@@ -1,0 +1,16 @@
+[Unit]
+Description=Hermes OCR Sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/hermes-ocr
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/hermes-ocr/ocr_sync.py
+Restart=always
+RestartSec=5
+User=www-data
+Group=www-data
+
+[Install]
+WantedBy=multi-user.target
