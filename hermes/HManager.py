@@ -24,31 +24,34 @@ c.execute("""CREATE TABLE IF NOT EXISTS directory(
 )""")
 conn.commit()
 
+ARAL_BLUE = "#0078D7"
+ARAL_RED = "#D00000"
+WHITE = "#FFFFFF"
+
 active_zone = None
+einbuchen_mode = False
 zone_buttons = {}
 
 def set_zone(z):
     global active_zone
-    active_zone = z.upper()
+    if not einbuchen_mode:
+        return
+    active_zone = z
+    for zz, btn in zone_buttons.items():
+        if zz == z:
+            btn.config(bg=ARAL_BLUE, fg=WHITE)
+        else:
+            btn.config(bg=WHITE, fg=ARAL_BLUE)
     zone_var.set(f"Aktive Zone: {active_zone}")
-    scan_entry.focus_set()
+    log(f"Zone {active_zone} gewählt")
 
 def handle_scan(event=None):
     val = scan_var.get().strip().replace(" ", "")
     scan_var.set("")
     if not val:
         return
-    u = val.upper()
-    if u.startswith("ZONE:"):
-        seg = u.split(":",1)[1]
-        if seg in ZONES:
-            set_zone(seg)
-            log(f"Zone {active_zone} aktiviert")
-        else:
-            log("Unbekannte Zone")
-        return
     if active_zone is None:
-        log("Bitte Zone scannen")
+        log("Bitte zuerst Zone wählen (Einbuchen aktivieren)")
         return
     ts = datetime.now().isoformat(timespec="seconds")
     c.execute("REPLACE INTO packages(sendungsnr,zone,received_at) VALUES(?,?,?)",(val,active_zone,ts))
@@ -58,6 +61,8 @@ def handle_scan(event=None):
 def run_search(event=None):
     term = search_var.get().strip()
     result_list.delete(0, tk.END)
+    for z in zone_buttons.values():
+        z.config(bg=WHITE, fg=ARAL_BLUE)
     if not term:
         return
     like = f"%{term.lower()}%"
@@ -86,8 +91,7 @@ def run_search(event=None):
         label = f"{sn}  {'— '+name if name else ''}  → {zone}  ({ts})"
         result_list.insert(tk.END, label)
         if zone in zone_buttons:
-            zone_buttons[zone]["bg"] = "#d00000"
-            zone_buttons[zone]["fg"] = "#ffffff"
+            zone_buttons[zone].config(bg=ARAL_RED, fg=WHITE)
 
 def delete_selected():
     sel = result_list.curselection()
@@ -105,19 +109,14 @@ def delete_selected():
 def clear_search():
     search_var.set("")
     result_list.delete(0, tk.END)
-    scan_entry.focus_set()
     for z in zone_buttons.values():
-        z["bg"] = "#ffffff"
-        z["fg"] = "#004b9b"
+        z.config(bg=WHITE, fg=ARAL_BLUE)
 
 def log(msg):
     ts = datetime.now().strftime("%H:%M:%S")
     log_list.insert(0, f"[{ts}] {msg}")
     if log_list.size() > 400:
         log_list.delete(400, tk.END)
-
-def focus_scan():
-    scan_entry.focus_set()
 
 def toggle_fullscreen(event=None):
     state = app.attributes("-fullscreen")
@@ -130,6 +129,21 @@ def quit_app(event=None):
     except:
         pass
     app.destroy()
+
+def toggle_einbuchen():
+    global einbuchen_mode, active_zone
+    einbuchen_mode = not einbuchen_mode
+    active_zone = None
+    if einbuchen_mode:
+        einbuchen_btn.config(text="Fertig", bg=ARAL_RED, fg=WHITE)
+        zone_var.set("Einbuchen aktiv – bitte Zone wählen")
+        for btn in zone_buttons.values():
+            btn.config(state="normal")
+    else:
+        einbuchen_btn.config(text="Einbuchen", bg=ARAL_BLUE, fg=WHITE)
+        zone_var.set("Einbuchen aus")
+        for btn in zone_buttons.values():
+            btn.config(state="disabled", bg=WHITE, fg=ARAL_BLUE)
 
 ZONES = ["A","B","C","D-1","D-2","D-3","D-4","E"]
 
@@ -148,25 +162,22 @@ top.pack(fill=X)
 zone_lbl = ttk.Label(top, textvariable=zone_var, font=("Arial", 28, "bold"))
 zone_lbl.pack(side=LEFT)
 
-ctrls = ttk.Frame(app, padding=(12,0))
-ctrls.pack(fill=X)
-ttk.Button(ctrls, text="Vollbild", bootstyle=SECONDARY, command=toggle_fullscreen).pack(side=RIGHT, padx=6)
-ttk.Button(ctrls, text="Beenden", bootstyle=DANGER, command=quit_app).pack(side=RIGHT, padx=6)
+# Eingabe / Suche
+search_box = ttk.Frame(app, padding=(12,8))
+search_box.pack(fill=X)
+ttk.Label(search_box, text="Suche (Name oder Nummer):", font=("Arial", 20)).grid(row=0, column=0, sticky=W)
+search_entry = ttk.Entry(search_box, textvariable=search_var, font=("Consolas", 26), width=18)
+search_entry.grid(row=0, column=1, padx=8)
+ttk.Button(search_box, text="Suchen", bootstyle=SECONDARY, command=run_search).grid(row=0, column=2, padx=6, ipadx=18, ipady=12)
+ttk.Button(search_box, text="Leeren", bootstyle=WARNING, command=clear_search).grid(row=0, column=3, padx=6, ipadx=18, ipady=12)
+einbuchen_btn = tk.Button(search_box, text="Einbuchen", font=("Arial", 20, "bold"), bg=ARAL_BLUE, fg=WHITE, command=toggle_einbuchen)
+einbuchen_btn.grid(row=0, column=4, padx=6, ipadx=18, ipady=12)
+ttk.Button(search_box, text="Beenden", bootstyle=DANGER, command=quit_app).grid(row=0, column=5, padx=6, ipadx=18, ipady=12)
 
-scan_box = ttk.Frame(app, padding=(12,8))
-scan_box.pack(fill=X)
-ttk.Label(scan_box, text="Scan (Zonen-QR oder Sendungsnummer):", font=("Arial", 20)).pack(anchor=W)
-scan_entry = ttk.Entry(scan_box, textvariable=scan_var, font=("Consolas", 26))
-scan_entry.pack(fill=X, pady=6)
-scan_entry.bind("<Return>", handle_scan)
-scan_entry.focus_set()
-
-# ----------------------------
-# Zonenbereich – Regal-Layout mit sehr großer Schrift und dicken Außenlinien
-# ----------------------------
-zones_frame = tk.Frame(app, bg="#ffffff", padx=12, pady=20)
+# Zonenlayout
+zones_frame = tk.Frame(app, bg=WHITE, padx=12, pady=20)
 zones_frame.pack(fill=tk.BOTH, expand=True)
-grid = tk.Frame(zones_frame, bg="#ffffff")
+grid = tk.Frame(zones_frame, bg=WHITE)
 grid.pack(expand=True, anchor="center")
 
 for col in range(5):
@@ -181,14 +192,15 @@ def make_zone_btn(txt, row, col, colspan=1, w=1.0, h=1.0):
         text=txt,
         command=lambda z=txt: set_zone(z),
         font=("Arial", 44, "bold"),
-        fg="#004b9b",
-        bg="#ffffff",
-        activebackground="#004b9b",
-        activeforeground="#ffffff",
+        fg=ARAL_BLUE,
+        bg=WHITE,
+        activebackground=ARAL_BLUE,
+        activeforeground=WHITE,
         width=int(6 * w),
         height=int(2 * h),
         relief="solid",
-        bd=8
+        bd=8,
+        state="disabled"
     )
     btn.grid(
         row=row,
@@ -211,15 +223,7 @@ make_zone_btn("D-3", 3, 2, w=1.0, h=1.0)
 make_zone_btn("D-4", 3, 3, w=1.0, h=1.0)
 make_zone_btn("E",   3, 4, w=2.0, h=1.0)
 
-search_box = ttk.Frame(app, padding=(12,8))
-search_box.pack(fill=X)
-ttk.Label(search_box, text="Suche (Name oder letzte Ziffern):", font=("Arial", 20)).grid(row=0, column=0, sticky=W)
-search_entry = ttk.Entry(search_box, textvariable=search_var, font=("Consolas", 26), width=18)
-search_entry.grid(row=0, column=1, padx=8)
-ttk.Button(search_box, text="Suchen", bootstyle=SECONDARY, command=run_search).grid(row=0, column=2, padx=6, ipadx=18, ipady=12)
-ttk.Button(search_box, text="Leeren", bootstyle=WARNING, command=clear_search).grid(row=0, column=3, padx=6, ipadx=18, ipady=12)
-ttk.Button(search_box, text="Scan-Fokus", bootstyle=PRIMARY, command=focus_scan).grid(row=0, column=4, padx=6, ipadx=18, ipady=12)
-
+# Ergebnislisten
 lists = ttk.Frame(app, padding=(12,6))
 lists.pack(fill=BOTH, expand=YES)
 result_list = tk.Listbox(lists, font=("Consolas", 20), height=8)
