@@ -13,16 +13,16 @@ fi
 cd /root/aralbruehl
 echo "git pull..."
 git pull
-echo "Service stoppen und entfernen, falls vorhanden"
+echo "stopping services..."
 systemctl stop hermes-gui.service 2>/dev/null || true
 systemctl disable hermes-gui.service 2>/dev/null || true
 rm -f /etc/systemd/system/hermes-gui.service
 
-echo"make directory..."
+echo "creating directory..."
 rm -rf /opt/hermes
 mkdir -p /opt/hermes
 
-echo"copying files..."
+echo "copying files..."
 cp -r . /opt/hermes
 
 echo "creating service..."
