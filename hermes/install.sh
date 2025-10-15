@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-echo "[INFO] Installiere Hermes GUI-Service..."
+echo "[Installing Service]f"
 
 # Root werden
 if [ "$(id -u)" -ne 0 ]; then
@@ -10,29 +10,29 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 cd /root/aralbruehl
+echo "git pull..."
 git pull
-# Service stoppen und entfernen, falls vorhanden
+echo "Service stoppen und entfernen, falls vorhanden"
 systemctl stop hermes-gui.service 2>/dev/null || true
 systemctl disable hermes-gui.service 2>/dev/null || true
 rm -f /etc/systemd/system/hermes-gui.service
 
-# Zielverzeichnis neu anlegen
+echo"make directory..."
 rm -rf /opt/hermes
 mkdir -p /opt/hermes
 
-# Alle Dateien aus aktuellem Repo-Ordner kopieren
+echo"copying files..."
 cp -r . /opt/hermes
 
-# Service-Datei verschieben
+echo "creating service..."
 mv /opt/hermes/hermes-gui.service /etc/systemd/system/hermes-gui.service
 
-# Berechtigungen
+echo "setting permissions..."
 chmod -R 755 /opt/hermes
 chown -R pi:pi /opt/hermes
 
-# Service aktivieren
+echo "activating service..."
 systemctl daemon-reload
 systemctl enable hermes-gui.service
 systemctl start hermes-gui.service
 
-echo "[OK] Hermes GUI-Service wurde erfolgreich installiert und gestartet."
