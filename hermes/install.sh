@@ -26,7 +26,7 @@ echo "copying files..."
 cp -r . /opt/hermes
 
 echo "creating service..."
-mv /opt/hermes/hermes-gui.service /etc/systemd/system/hermes-gui.service
+mv hermes-gui.service /etc/systemd/system/hermes-gui.service
 
 echo "setting permissions..."
 chmod -R 755 /opt/hermes
