@@ -1,0 +1,18 @@
+[Unit]
+Description=Hermes Paketmanager GUI Autostart
+After=graphical.target network-online.target
+Wants=graphical.target
+
+[Service]
+User=pi
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/pi/.Xauthority
+WorkingDirectory=/opt/hermes
+ExecStart=/opt/hermes/venv/bin/python3 /opt/hermes/app.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical.target
