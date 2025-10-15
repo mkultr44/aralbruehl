@@ -9,6 +9,8 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+cd /root/aralbruehl
+git pull
 # Service stoppen und entfernen, falls vorhanden
 systemctl stop hermes-gui.service 2>/dev/null || true
 systemctl disable hermes-gui.service 2>/dev/null || true
