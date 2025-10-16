@@ -1,6 +1,0 @@
-requests
-pytesseract
-Pillow
-pillow-heif
-lxml
-python-dotenv
