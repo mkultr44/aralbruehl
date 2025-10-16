@@ -40,6 +40,7 @@ ARAL_BLUE = "#0078D7"
 ARAL_RED = "#D00000"
 ARAL_GREEN = "#009F4D"
 WHITE = "#FFFFFF"
+TEXT_DARK = "#0A0A0A"
 
 os.makedirs(BASE_DIR, exist_ok=True)
 
@@ -131,6 +132,7 @@ einbuchen_btn: tk.Button
 counter_value_lbl: tk.Label
 counter_frame: ttk.Frame
 result_panel: ttk.Frame
+style: ttk.Style
 
 
 # --- UI State --------------------------------------------------------------
@@ -167,6 +169,44 @@ def ensure_focus() -> None:
     if "search_entry" in globals():
         search_entry.focus_set()
         search_entry.icursor(tk.END)
+
+
+def init_styles() -> ttk.Style:
+    """Initialisiert ttk Styles für ein konsistentes Erscheinungsbild."""
+
+    style = ttk.Style()
+    style.configure("White.TFrame", background=WHITE)
+    style.configure("White.TLabel", background=WHITE, foreground=TEXT_DARK)
+    style.configure(
+        "Header.TLabel",
+        background=WHITE,
+        foreground=TEXT_DARK,
+        font=("Arial", 20, "bold"),
+    )
+    style.configure(
+        "CounterText.TLabel",
+        background=WHITE,
+        foreground="black",
+        font=("Arial", 24, "bold"),
+    )
+    return style
+
+
+def apply_listbox_theme(widget: tk.Listbox) -> None:
+    """Sorgt für weiße Hintergründe und Aral-Auswahlfarben in Listboxen."""
+
+    widget.configure(
+        activestyle="none",
+        background=WHITE,
+        borderwidth=0,
+        fg=TEXT_DARK,
+        highlightbackground=ARAL_BLUE,
+        highlightcolor=ARAL_BLUE,
+        highlightthickness=1,
+        relief="flat",
+        selectbackground=ARAL_BLUE,
+        selectforeground=WHITE,
+    )
 
 
 def update_counter_label() -> None:
@@ -277,7 +317,7 @@ def toggle_einbuchen() -> None:
         )
         counter_frame.pack_forget()
         show_result_panel(True)
-        display_packages(fetch_all_packages())
+        run_search()
         log("Einbuchen beendet")
     update_counter_label()
     ensure_focus()
@@ -611,26 +651,33 @@ def schedule_sync() -> None:
 def build_gui() -> None:
     global app, search_var, zone_var, counter_var
     global search_entry, result_list, log_list, warning_label, einbuchen_btn
-    global counter_value_lbl, counter_frame, result_panel
+    global counter_value_lbl, counter_frame, result_panel, style
 
     app = ttk.Window(title="Paket-Zonen-Manager", themename="flatly")
     app.geometry("1280x800")
     app.resizable(False, False)
+    app.configure(background=WHITE)
+
+    style = init_styles()
 
     zone_var = tk.StringVar(value="Suche aktiv")
     search_var = tk.StringVar()
     counter_var = tk.StringVar(value="0")
 
     # Kopfzeile
-    top = ttk.Frame(app, padding=16)
+    top = ttk.Frame(app, padding=16, style="White.TFrame")
     top.pack(fill=tk.X)
 
-    ttk.Label(top, textvariable=zone_var, font=("Arial", 26, "bold"), anchor=tk.W).pack(
-        side=tk.LEFT, fill=tk.X, expand=True
-    )
+    ttk.Label(
+        top,
+        textvariable=zone_var,
+        font=("Arial", 26, "bold"),
+        anchor=tk.W,
+        style="White.TLabel",
+    ).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-    counter_frame = ttk.Frame(top)
-    ttk.Label(counter_frame, text="Eingebucht:", font=("Arial", 24, "bold"), foreground="black").pack(
+    counter_frame = ttk.Frame(top, style="White.TFrame")
+    ttk.Label(counter_frame, text="Eingebucht:", style="CounterText.TLabel").pack(
         side=tk.LEFT, padx=(0, 6)
     )
     counter_value_lbl = tk.Label(
@@ -638,16 +685,19 @@ def build_gui() -> None:
         textvariable=counter_var,
         font=("Arial", 30, "bold"),
         fg=ARAL_RED,
-        bg=top.cget("background"),
+        bg=WHITE,
     )
     counter_value_lbl.pack(side=tk.LEFT)
 
     # Eingabezeile
-    search_row = ttk.Frame(app, padding=(16, 0))
+    search_row = ttk.Frame(app, padding=(16, 0), style="White.TFrame")
     search_row.pack(fill=tk.X, pady=(0, 8))
-    ttk.Label(search_row, text="Eingabe (Scan / Suche):", font=("Arial", 20)).grid(
-        row=0, column=0, sticky=tk.W, padx=(0, 12)
-    )
+    ttk.Label(
+        search_row,
+        text="Eingabe (Scan / Suche):",
+        font=("Arial", 20),
+        style="White.TLabel",
+    ).grid(row=0, column=0, sticky=tk.W, padx=(0, 12))
     search_entry = ttk.Entry(search_row, textvariable=search_var, font=("Consolas", 28), width=24)
     search_entry.grid(row=0, column=1, sticky=tk.W)
     search_entry.bind("<Return>", handle_scan_or_enter)
@@ -713,11 +763,24 @@ def build_gui() -> None:
     )
     einbuchen_btn.grid(row=0, column=0, sticky="nsew", ipadx=10, ipady=10)
 
-    result_panel = ttk.Frame(ctrl, padding=(0, 16, 0, 0))
+    result_panel = ttk.Frame(ctrl, padding=(0, 16, 0, 0), style="White.TFrame")
     result_panel.grid(row=1, column=0, sticky="nsew")
-    ttk.Label(result_panel, text="Pakete", font=("Arial", 20, "bold")).pack(anchor=tk.W)
-    result_list = tk.Listbox(result_panel, font=("Consolas", 18), height=16)
-    result_list.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+    ttk.Label(result_panel, text="Pakete", style="Header.TLabel").pack(anchor=tk.W)
+
+    result_container = ttk.Frame(result_panel, style="White.TFrame")
+    result_container.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+    result_scroll = ttk.Scrollbar(result_container, orient=tk.VERTICAL)
+    result_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    result_list = tk.Listbox(
+        result_container,
+        font=("Consolas", 18),
+        height=16,
+        exportselection=False,
+        yscrollcommand=result_scroll.set,
+    )
+    apply_listbox_theme(result_list)
+    result_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    result_scroll.config(command=result_list.yview)
     result_list.bind("<<ListboxSelect>>", on_result_select)
 
     # Helper zum Erzeugen der Buttons
@@ -733,6 +796,7 @@ def build_gui() -> None:
             activeforeground=ARAL_BLUE,
             relief="solid",
             bd=4,
+            highlightthickness=0,
         )
         btn.grid(row=r, column=c, columnspan=colspan, padx=12, pady=12, sticky="nsew")
         zone_buttons[name] = btn
@@ -749,27 +813,46 @@ def build_gui() -> None:
     make_zone_btn("E-4", 5, 3, font_size=42)
     make_zone_btn("F", 5, 4, font_size=42)
 
+    reset_zone_colors()
+
     # Protokoll-Liste
-    log_panel = ttk.Frame(app, padding=(16, 8))
+    log_panel = ttk.Frame(app, padding=(16, 8), style="White.TFrame")
     log_panel.pack(fill=tk.BOTH, expand=True)
-    ttk.Label(log_panel, text="Protokoll", font=("Arial", 20, "bold")).pack(anchor=tk.W)
-    log_list = tk.Listbox(log_panel, font=("Consolas", 14), height=8)
-    log_list.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+    ttk.Label(log_panel, text="Protokoll", style="Header.TLabel").pack(anchor=tk.W)
+
+    log_container = ttk.Frame(log_panel, style="White.TFrame")
+    log_container.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+    log_scroll = ttk.Scrollbar(log_container, orient=tk.VERTICAL)
+    log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    log_list = tk.Listbox(
+        log_container,
+        font=("Consolas", 14),
+        height=8,
+        exportselection=False,
+        yscrollcommand=log_scroll.set,
+    )
+    apply_listbox_theme(log_list)
+    log_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    log_scroll.config(command=log_list.yview)
 
     # Aktionen
-    actions = ttk.Frame(app, padding=(16, 8))
+    actions = ttk.Frame(app, padding=(16, 8), style="White.TFrame")
     actions.pack(fill=tk.X)
 
     ttk.Button(actions, text="Treffer löschen", bootstyle="danger", command=delete_selected).pack(
         side=tk.LEFT, padx=(0, 12)
     )
-    ttk.Button(actions, text="Alle anzeigen", bootstyle="secondary", command=lambda: (search_var.set(""), run_search())).pack(
-        side=tk.LEFT
-    )
+    ttk.Button(
+        actions,
+        text="Alle anzeigen",
+        bootstyle="secondary",
+        command=lambda: (search_var.set(""), run_search()),
+    ).pack(side=tk.LEFT)
 
     # Initiale Daten anzeigen
     show_result_panel(True)
     display_packages(fetch_all_packages())
+    update_counter_label()
     ensure_focus()
 
     # periodische Syncs starten
