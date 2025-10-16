@@ -1,11 +1,4 @@
-# GUI & System
-tk
-# SQLite ist in Python integriert, keine externe Abhängigkeit
-# Für eventuelle spätere Erweiterungen:
-pillow
-pyzbar
-opencv-python
-tesseract
-pytesseract
-# Web / Flask (optional für spätere Weboberfläche)
-flask
+# Kernanwendung
+ttkbootstrap
+rapidfuzz
+requests
