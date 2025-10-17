@@ -8,7 +8,7 @@ User=pi
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/pi/.Xauthority
 WorkingDirectory=/opt/hermes
-ExecStart=/opt/hermes/venv/bin/python3 /opt/hermes/app.py
+ExecStart=/opt/hermes/venv/bin/python3 /opt/hermes/app.py --fullscreen
 Restart=always
 RestartSec=5
 StandardOutput=journal
