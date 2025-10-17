@@ -13,6 +13,7 @@ Lagerzonen. Kernfunktionen:
 
 from __future__ import annotations
 
+import argparse
 import csv
 import io
 import os
@@ -21,7 +22,7 @@ import threading
 import tkinter as tk
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import ttkbootstrap as ttk
 from rapidfuzz import fuzz, process
@@ -40,6 +41,7 @@ ARAL_BLUE = "#0078D7"
 ARAL_RED = "#D00000"
 ARAL_GREEN = "#009F4D"
 WHITE = "#FFFFFF"
+TEXT_DARK = "#0A0A0A"
 
 os.makedirs(BASE_DIR, exist_ok=True)
 
@@ -129,6 +131,9 @@ log_list: tk.Listbox
 warning_label: tk.Label
 einbuchen_btn: tk.Button
 counter_value_lbl: tk.Label
+counter_frame: ttk.Frame
+result_panel: ttk.Frame
+style: ttk.Style
 
 
 # --- UI State --------------------------------------------------------------
@@ -138,6 +143,7 @@ einbuchen_mode: bool = False
 zone_buttons: Dict[str, tk.Button] = {}
 session_counter: int = 0
 warning_job: Optional[str] = None
+result_rows: List[Dict[str, str]] = []
 
 
 # --- Hilfsfunktionen -------------------------------------------------------
@@ -166,6 +172,44 @@ def ensure_focus() -> None:
         search_entry.icursor(tk.END)
 
 
+def init_styles() -> ttk.Style:
+    """Initialisiert ttk Styles für ein konsistentes Erscheinungsbild."""
+
+    style = ttk.Style()
+    style.configure("White.TFrame", background=WHITE)
+    style.configure("White.TLabel", background=WHITE, foreground=TEXT_DARK)
+    style.configure(
+        "Header.TLabel",
+        background=WHITE,
+        foreground=TEXT_DARK,
+        font=("Arial", 20, "bold"),
+    )
+    style.configure(
+        "CounterText.TLabel",
+        background=WHITE,
+        foreground="black",
+        font=("Arial", 24, "bold"),
+    )
+    return style
+
+
+def apply_listbox_theme(widget: tk.Listbox) -> None:
+    """Sorgt für weiße Hintergründe und Aral-Auswahlfarben in Listboxen."""
+
+    widget.configure(
+        activestyle="none",
+        background=WHITE,
+        borderwidth=0,
+        fg=TEXT_DARK,
+        highlightbackground=ARAL_BLUE,
+        highlightcolor=ARAL_BLUE,
+        highlightthickness=1,
+        relief="flat",
+        selectbackground=ARAL_BLUE,
+        selectforeground=WHITE,
+    )
+
+
 def update_counter_label() -> None:
     counter_var.set(str(session_counter))
     color = ARAL_RED if session_counter == 0 else ARAL_GREEN
@@ -175,6 +219,25 @@ def update_counter_label() -> None:
 def reset_zone_colors() -> None:
     for btn in zone_buttons.values():
         btn.config(bg=WHITE, fg=ARAL_BLUE, activebackground=WHITE, activeforeground=ARAL_BLUE)
+
+
+def refresh_zone_highlights(selected_zone: Optional[str] = None) -> None:
+    reset_zone_colors()
+    if einbuchen_mode and active_zone:
+        highlight_zone(active_zone, "blue")
+    if selected_zone:
+        highlight_zone(selected_zone, "red")
+
+
+def show_result_panel(show: bool) -> None:
+    if "result_panel" not in globals():
+        return
+    if show:
+        result_panel.grid()
+    else:
+        result_panel.grid_remove()
+    if "result_list" in globals() and not show:
+        result_list.selection_clear(0, tk.END)
 
 
 def highlight_zone(zone: str, color: str) -> None:
@@ -218,8 +281,7 @@ def set_zone(zone: str) -> None:
         return
     active_zone = zone
     hide_zone_warning()
-    reset_zone_colors()
-    highlight_zone(zone, "blue")
+    refresh_zone_highlights()
     zone_var.set(f"Aktive Zone: {active_zone}")
     log(f"Zone {active_zone} gewählt")
     ensure_focus()
@@ -229,7 +291,7 @@ def toggle_einbuchen() -> None:
     global einbuchen_mode, active_zone, session_counter
     einbuchen_mode = not einbuchen_mode
     active_zone = None
-    reset_zone_colors()
+    refresh_zone_highlights()
     hide_zone_warning()
     if einbuchen_mode:
         session_counter = 0
@@ -241,6 +303,8 @@ def toggle_einbuchen() -> None:
             activebackground=ARAL_RED,
             activeforeground=WHITE,
         )
+        counter_frame.pack(side=tk.RIGHT)
+        show_result_panel(False)
         log("Einbuchen gestartet")
     else:
         session_counter = 0
@@ -252,6 +316,9 @@ def toggle_einbuchen() -> None:
             activebackground=ARAL_BLUE,
             activeforeground=WHITE,
         )
+        counter_frame.pack_forget()
+        show_result_panel(True)
+        run_search()
         log("Einbuchen beendet")
     update_counter_label()
     ensure_focus()
@@ -369,30 +436,49 @@ def fetch_all_packages() -> List[sqlite3.Row]:
     return list(rows)
 
 
-def display_packages(rows: Iterable[sqlite3.Row]) -> None:
+def populate_result_list(
+    items: Sequence[Mapping[str, Any]], *, empty_message: str
+) -> None:
+    result_rows.clear()
+    if "result_list" not in globals():
+        return
     result_list.delete(0, tk.END)
-    reset_zone_colors()
+    refresh_zone_highlights()
 
-    seen_zones = set()
-    for row in rows:
-        zone = row["zone"] or "-"
-        name = row["name"].strip()
-        timestamp = row["received_at"]
-        label = f"{row['sendungsnr']}"
+    if not items:
+        result_list.insert(tk.END, empty_message)
+        return
+
+    for item in items:
+        sendungsnr = str(item.get("sendungsnr") or "").strip()
+        if not sendungsnr:
+            continue
+        name = str(item.get("name") or "").strip()
+        zone = str(item.get("zone") or "").strip()
+        timestamp = str(item.get("received_at") or "").strip()
+        score = item.get("score")
+
+        label = f"{sendungsnr}"
         if name:
             label += f" — {name}"
-        label += f" → {zone}"
+        label += f" → {zone or '-'}"
         if timestamp:
             label += f" ({timestamp})"
+        if score is not None and score != "":
+            label += f"  [Score {score}]"
+
         result_list.insert(tk.END, label)
-        if row["zone"]:
-            seen_zones.add(row["zone"])
+        result_rows.append({
+            "sendungsnr": sendungsnr,
+            "zone": zone,
+        })
 
-    for zone in seen_zones:
-        highlight_zone(zone, "red")
+    if not result_rows and result_list.size() == 0:
+        result_list.insert(tk.END, empty_message)
 
-    if result_list.size() == 0:
-        result_list.insert(tk.END, "Keine Pakete vorhanden")
+
+def display_packages(rows: Iterable[sqlite3.Row]) -> None:
+    populate_result_list([dict(row) for row in rows], empty_message="Keine Pakete vorhanden")
 
 
 def run_search(event: Optional[tk.Event] = None) -> None:
@@ -400,8 +486,7 @@ def run_search(event: Optional[tk.Event] = None) -> None:
     rows = fetch_all_packages()
 
     if not rows:
-        result_list.delete(0, tk.END)
-        result_list.insert(tk.END, "Keine Pakete vorhanden")
+        populate_result_list([], empty_message="Keine Pakete vorhanden")
         return
 
     if not term:
@@ -430,8 +515,7 @@ def run_search(event: Optional[tk.Event] = None) -> None:
     )
 
     if not matches:
-        result_list.delete(0, tk.END)
-        result_list.insert(tk.END, "Kein Treffer")
+        populate_result_list([], empty_message="Kein Treffer")
         return
 
     sorted_rows: List[sqlite3.Row] = []
@@ -447,28 +531,7 @@ def run_search(event: Optional[tk.Event] = None) -> None:
         sorted_rows.append(row)
         seen_keys.add(key)
 
-    result_list.delete(0, tk.END)
-    reset_zone_colors()
-    seen_zones = set()
-    for row in sorted_rows:
-        zone = row.get("zone") or "-"
-        name = (row.get("name") or "").strip()
-        timestamp = row.get("received_at") or ""
-        score = row.get("score")
-        label = f"{row['sendungsnr']}"
-        if name:
-            label += f" — {name}"
-        label += f" → {zone}"
-        if timestamp:
-            label += f" ({timestamp})"
-        if score is not None:
-            label += f"  [Score {score}]"
-        result_list.insert(tk.END, label)
-        if row.get("zone"):
-            seen_zones.add(row["zone"])
-
-    for zone in seen_zones:
-        highlight_zone(zone, "red")
+    populate_result_list(sorted_rows, empty_message="Kein Treffer")
 
 
 def delete_selected() -> None:
@@ -483,7 +546,19 @@ def delete_selected() -> None:
         conn.execute("DELETE FROM packages WHERE sendungsnr=?", (sendungsnr,))
         conn.commit()
     result_list.delete(sel[0])
+    if sel[0] < len(result_rows):
+        del result_rows[sel[0]]
+    refresh_zone_highlights()
     log(f"{sendungsnr} gelöscht")
+
+
+def on_result_select(_event: tk.Event) -> None:
+    sel = result_list.curselection()
+    if not sel or sel[0] >= len(result_rows):
+        refresh_zone_highlights()
+        return
+    zone = result_rows[sel[0]].get("zone") or ""
+    refresh_zone_highlights(zone if zone else None)
 
 
 # --- CSV Synchronisation ---------------------------------------------------
@@ -571,44 +646,75 @@ def schedule_sync() -> None:
     thread.start()
 
 
+# --- CLI -------------------------------------------------------------------
+
+
+def parse_cli_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Hermes Paket-Zonen-Manager")
+    parser.add_argument(
+        "--fullscreen",
+        action="store_true",
+        help="Startet die Anwendung im Vollbildmodus.",
+    )
+    return parser.parse_args()
+
+
 # --- GUI Aufbau ------------------------------------------------------------
 
 
-def build_gui() -> None:
+def build_gui(*, fullscreen: bool = False) -> None:
     global app, search_var, zone_var, counter_var
     global search_entry, result_list, log_list, warning_label, einbuchen_btn
-    global counter_value_lbl
+    global counter_value_lbl, counter_frame, result_panel, style
 
     app = ttk.Window(title="Paket-Zonen-Manager", themename="flatly")
     app.geometry("1280x800")
     app.resizable(False, False)
+    app.configure(background=WHITE)
+
+    if fullscreen:
+        app.after_idle(lambda: app.attributes("-fullscreen", True))
+
+    style = init_styles()
 
     zone_var = tk.StringVar(value="Suche aktiv")
     search_var = tk.StringVar()
     counter_var = tk.StringVar(value="0")
 
     # Kopfzeile
-    top = ttk.Frame(app, padding=16)
+    top = ttk.Frame(app, padding=16, style="White.TFrame")
     top.pack(fill=tk.X)
 
-    ttk.Label(top, textvariable=zone_var, font=("Arial", 26, "bold"), anchor=tk.W).pack(
-        side=tk.LEFT, fill=tk.X, expand=True
-    )
+    ttk.Label(
+        top,
+        textvariable=zone_var,
+        font=("Arial", 26, "bold"),
+        anchor=tk.W,
+        style="White.TLabel",
+    ).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-    counter_frame = ttk.Frame(top)
-    counter_frame.pack(side=tk.RIGHT)
-    ttk.Label(counter_frame, text="Eingebucht:", font=("Arial", 24, "bold"), foreground="black").pack(
+    counter_frame = ttk.Frame(top, style="White.TFrame")
+    ttk.Label(counter_frame, text="Eingebucht:", style="CounterText.TLabel").pack(
         side=tk.LEFT, padx=(0, 6)
     )
-    counter_value_lbl = tk.Label(counter_frame, textvariable=counter_var, font=("Arial", 30, "bold"), fg=ARAL_RED, bg=top.cget("background"))
+    counter_value_lbl = tk.Label(
+        counter_frame,
+        textvariable=counter_var,
+        font=("Arial", 30, "bold"),
+        fg=ARAL_RED,
+        bg=WHITE,
+    )
     counter_value_lbl.pack(side=tk.LEFT)
 
     # Eingabezeile
-    search_row = ttk.Frame(app, padding=(16, 0))
+    search_row = ttk.Frame(app, padding=(16, 0), style="White.TFrame")
     search_row.pack(fill=tk.X, pady=(0, 8))
-    ttk.Label(search_row, text="Eingabe (Scan / Suche):", font=("Arial", 20)).grid(
-        row=0, column=0, sticky=tk.W, padx=(0, 12)
-    )
+    ttk.Label(
+        search_row,
+        text="Eingabe (Scan / Suche):",
+        font=("Arial", 20),
+        style="White.TLabel",
+    ).grid(row=0, column=0, sticky=tk.W, padx=(0, 12))
     search_entry = ttk.Entry(search_row, textvariable=search_var, font=("Consolas", 28), width=24)
     search_entry.grid(row=0, column=1, sticky=tk.W)
     search_entry.bind("<Return>", handle_scan_or_enter)
@@ -650,9 +756,10 @@ def build_gui() -> None:
 
     # Steuerbereich oben rechts
     ctrl = tk.Frame(grid, bg=WHITE)
-    ctrl.grid(row=0, column=3, columnspan=2, sticky="nsew", padx=14, pady=(0, 8))
-    for j in range(2):
-        ctrl.grid_columnconfigure(j, weight=1)
+    ctrl.grid(row=0, column=3, columnspan=2, rowspan=6, sticky="nsew", padx=14, pady=(0, 8))
+    ctrl.grid_columnconfigure(0, weight=1)
+    ctrl.grid_rowconfigure(0, weight=0)
+    ctrl.grid_rowconfigure(1, weight=1)
 
     global zone_buttons
     zone_buttons = {}
@@ -671,7 +778,27 @@ def build_gui() -> None:
         pady=18,
         command=toggle_einbuchen,
     )
-    einbuchen_btn.grid(row=0, column=0, columnspan=2, sticky="nsew", ipadx=10, ipady=10)
+    einbuchen_btn.grid(row=0, column=0, sticky="nsew", ipadx=10, ipady=10)
+
+    result_panel = ttk.Frame(ctrl, padding=(0, 16, 0, 0), style="White.TFrame")
+    result_panel.grid(row=1, column=0, sticky="nsew")
+    ttk.Label(result_panel, text="Pakete", style="Header.TLabel").pack(anchor=tk.W)
+
+    result_container = ttk.Frame(result_panel, style="White.TFrame")
+    result_container.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+    result_scroll = ttk.Scrollbar(result_container, orient=tk.VERTICAL)
+    result_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    result_list = tk.Listbox(
+        result_container,
+        font=("Consolas", 18),
+        height=16,
+        exportselection=False,
+        yscrollcommand=result_scroll.set,
+    )
+    apply_listbox_theme(result_list)
+    result_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    result_scroll.config(command=result_list.yview)
+    result_list.bind("<<ListboxSelect>>", on_result_select)
 
     # Helper zum Erzeugen der Buttons
     def make_zone_btn(name: str, r: int, c: int, colspan: int = 1, font_size: int = 48) -> tk.Button:
@@ -686,6 +813,7 @@ def build_gui() -> None:
             activeforeground=ARAL_BLUE,
             relief="solid",
             bd=4,
+            highlightthickness=0,
         )
         btn.grid(row=r, column=c, columnspan=colspan, padx=12, pady=12, sticky="nsew")
         zone_buttons[name] = btn
@@ -702,29 +830,46 @@ def build_gui() -> None:
     make_zone_btn("E-4", 5, 3, font_size=42)
     make_zone_btn("F", 5, 4, font_size=42)
 
-    # Ergebnis- und Loglisten
-    lists = ttk.Frame(app, padding=(16, 8))
-    lists.pack(fill=tk.BOTH, expand=True)
+    reset_zone_colors()
 
-    result_list = tk.Listbox(lists, font=("Consolas", 18), height=7)
-    result_list.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(0, 12))
+    # Protokoll-Liste
+    log_panel = ttk.Frame(app, padding=(16, 8), style="White.TFrame")
+    log_panel.pack(fill=tk.BOTH, expand=True)
+    ttk.Label(log_panel, text="Protokoll", style="Header.TLabel").pack(anchor=tk.W)
 
-    log_list = tk.Listbox(lists, font=("Consolas", 14), height=7)
-    log_list.pack(fill=tk.BOTH, expand=True, side=tk.RIGHT)
+    log_container = ttk.Frame(log_panel, style="White.TFrame")
+    log_container.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+    log_scroll = ttk.Scrollbar(log_container, orient=tk.VERTICAL)
+    log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    log_list = tk.Listbox(
+        log_container,
+        font=("Consolas", 14),
+        height=8,
+        exportselection=False,
+        yscrollcommand=log_scroll.set,
+    )
+    apply_listbox_theme(log_list)
+    log_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    log_scroll.config(command=log_list.yview)
 
     # Aktionen
-    actions = ttk.Frame(app, padding=(16, 8))
+    actions = ttk.Frame(app, padding=(16, 8), style="White.TFrame")
     actions.pack(fill=tk.X)
 
     ttk.Button(actions, text="Treffer löschen", bootstyle="danger", command=delete_selected).pack(
         side=tk.LEFT, padx=(0, 12)
     )
-    ttk.Button(actions, text="Alle anzeigen", bootstyle="secondary", command=lambda: (search_var.set(""), run_search())).pack(
-        side=tk.LEFT
-    )
+    ttk.Button(
+        actions,
+        text="Alle anzeigen",
+        bootstyle="secondary",
+        command=lambda: (search_var.set(""), run_search()),
+    ).pack(side=tk.LEFT)
 
     # Initiale Daten anzeigen
+    show_result_panel(True)
     display_packages(fetch_all_packages())
+    update_counter_label()
     ensure_focus()
 
     # periodische Syncs starten
@@ -738,6 +883,9 @@ def build_gui() -> None:
 
 
 if __name__ == "__main__":
-    build_gui()
+    args = parse_cli_args()
+    env_fullscreen = os.environ.get("HERMES_FULLSCREEN", "").strip().lower()
+    fullscreen_flag = args.fullscreen or env_fullscreen in {"1", "true", "yes", "on"}
+    build_gui(fullscreen=fullscreen_flag)
     app.mainloop()
 
