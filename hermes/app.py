@@ -22,6 +22,7 @@ import tkinter as tk
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import ttkbootstrap as ttk
 from rapidfuzz import fuzz, process
@@ -517,6 +518,263 @@ def run_search(event: Optional[tk.Event] = None) -> None:
         populate_result_list([], empty_message="Kein Treffer")
         return
 
+def highlight_zone(zone: str, color: str) -> None:
+    btn = zone_buttons.get(zone)
+    if not btn:
+        return
+    if color == "blue":
+        btn.config(bg=ARAL_BLUE, fg=WHITE, activebackground=ARAL_BLUE, activeforeground=WHITE)
+    elif color == "red":
+        btn.config(bg=ARAL_RED, fg=WHITE, activebackground=ARAL_RED, activeforeground=WHITE)
+
+
+def hide_zone_warning() -> None:
+    global warning_job
+    if "warning_label" not in globals():
+        return
+    warning_label.grid_remove()
+    if warning_job is not None:
+        app.after_cancel(warning_job)
+        warning_job = None
+
+
+def blink_warning(state: bool = True) -> None:
+    global warning_job
+    if "warning_label" not in globals():
+        return
+    warning_label.config(bg=ARAL_RED if state else WHITE, fg=WHITE if state else ARAL_RED)
+    warning_job = app.after(400, blink_warning, not state)
+
+
+def show_zone_warning() -> None:
+    if "warning_label" not in globals():
+        return
+    warning_label.grid()
+    blink_warning(True)
+
+
+def set_zone(zone: str) -> None:
+    global active_zone
+    if not einbuchen_mode:
+        return
+    active_zone = zone
+    hide_zone_warning()
+    reset_zone_colors()
+    highlight_zone(zone, "blue")
+    zone_var.set(f"Aktive Zone: {active_zone}")
+    log(f"Zone {active_zone} gewählt")
+    ensure_focus()
+
+
+def toggle_einbuchen() -> None:
+    global einbuchen_mode, active_zone, session_counter
+    einbuchen_mode = not einbuchen_mode
+    active_zone = None
+    reset_zone_colors()
+    hide_zone_warning()
+    if einbuchen_mode:
+        session_counter = 0
+        zone_var.set("Einbuchen aktiv – bitte Zone wählen")
+        einbuchen_btn.config(
+            text="Fertig",
+            bg=ARAL_RED,
+            fg=WHITE,
+            activebackground=ARAL_RED,
+            activeforeground=WHITE,
+        )
+        log("Einbuchen gestartet")
+    else:
+        session_counter = 0
+        zone_var.set("Suche aktiv")
+        einbuchen_btn.config(
+            text="Einbuchen",
+            bg=ARAL_BLUE,
+            fg=WHITE,
+            activebackground=ARAL_BLUE,
+            activeforeground=WHITE,
+        )
+        log("Einbuchen beendet")
+    update_counter_label()
+    ensure_focus()
+
+
+def match_directory(sendungsnr: str) -> Tuple[Optional[str], Sequence[str], Optional[int]]:
+    """Fuzzy-Abgleich der Sendungsnummer gegen den Directory-Cache."""
+
+    if not sendungsnr:
+        return None, [], None
+
+    key = sendungsnr.strip()
+    entry = directory_cache.get(key)
+    if entry:
+        return entry.name or None, [key], 100
+
+    if not directory_choices:
+        return None, [], None
+
+    matches = process.extract(
+        key,
+        directory_choices,
+        scorer=fuzz.WRatio,
+        processor=None,
+        score_cutoff=85,
+        limit=6,
+    )
+    if not matches:
+        return None, [], None
+
+    best_score = matches[0][1]
+    best_key = matches[0][0]
+    matched_keys = [choice for choice, _score, *_ in matches]
+
+    if best_score >= 90:
+        name = directory_cache.get(best_key)
+        return (name.name if name else None), matched_keys, best_score
+
+    plausible_names = {
+        directory_cache[choice].name
+        for choice, score, *_ in matches
+        if 85 <= score <= 95 and choice in directory_cache and directory_cache[choice].name
+    }
+    combined = " / ".join(sorted(plausible_names)) if plausible_names else None
+    return combined or None, matched_keys, best_score
+
+
+def insert_package(sendungsnr: str, zone: str, name: Optional[str]) -> None:
+    ts = datetime.now().isoformat(timespec="seconds")
+    with DB_LOCK:
+        conn.execute(
+            """
+            INSERT INTO packages (sendungsnr, zone, received_at, name)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(sendungsnr) DO UPDATE SET
+                zone=excluded.zone,
+                received_at=excluded.received_at,
+                name=excluded.name
+            """,
+            (sendungsnr, zone, ts, name),
+        )
+        conn.commit()
+
+
+def handle_scan_or_enter(event: Optional[tk.Event] = None) -> str:
+    global session_counter
+    value = search_var.get().strip()
+
+    if not value:
+        if not einbuchen_mode:
+            run_search()
+        return "break"
+
+    if einbuchen_mode:
+        if not active_zone:
+            log("Zone auswählen, bevor eingebucht wird")
+            show_zone_warning()
+            ensure_focus()
+            return "break"
+        name, matches, score = match_directory(value)
+        insert_package(value, active_zone, name)
+        session_counter += 1
+        update_counter_label()
+        log_msg = f"{value} → {active_zone}"
+        if name:
+            log_msg += f" ({name})"
+        if score is not None:
+            log_msg += f" [Score {score}]"
+        elif matches:
+            log_msg += " [Mehrfachtreffer]"
+        log(log_msg)
+        if matches and len(matches) > 1:
+            log(f"Fuzzy Matches: {', '.join(matches)}")
+        search_var.set("")
+        ensure_focus()
+        return "break"
+
+    run_search()
+    return "break"
+
+
+def fetch_all_packages() -> List[sqlite3.Row]:
+    with DB_LOCK:
+        rows = conn.execute(
+            """
+            SELECT sendungsnr,
+                   COALESCE(name, '') AS name,
+                   COALESCE(zone, '') AS zone,
+                   COALESCE(received_at, '') AS received_at
+            FROM packages
+            ORDER BY datetime(received_at) DESC
+            LIMIT 500
+            """
+        ).fetchall()
+    return list(rows)
+
+
+def display_packages(rows: Iterable[sqlite3.Row]) -> None:
+    result_list.delete(0, tk.END)
+    reset_zone_colors()
+
+    seen_zones = set()
+    for row in rows:
+        zone = row["zone"] or "-"
+        name = row["name"].strip()
+        timestamp = row["received_at"]
+        label = f"{row['sendungsnr']}"
+        if name:
+            label += f" — {name}"
+        label += f" → {zone}"
+        if timestamp:
+            label += f" ({timestamp})"
+        result_list.insert(tk.END, label)
+        if row["zone"]:
+            seen_zones.add(row["zone"])
+
+    for zone in seen_zones:
+        highlight_zone(zone, "red")
+
+    if result_list.size() == 0:
+        result_list.insert(tk.END, "Keine Pakete vorhanden")
+
+
+def run_search(event: Optional[tk.Event] = None) -> None:
+    term = search_var.get().strip()
+    rows = fetch_all_packages()
+
+    if not rows:
+        result_list.delete(0, tk.END)
+        result_list.insert(tk.END, "Keine Pakete vorhanden")
+        return
+
+    if not term:
+        display_packages(rows)
+        return
+
+    choices: Dict[str, sqlite3.Row] = {}
+    dataset: Dict[str, str] = {}
+    for row in rows:
+        key = row["sendungsnr"]
+        choices[key] = row
+        candidate = " ".join(
+            part
+            for part in (row["sendungsnr"], row["name"], row["zone"])
+            if part
+        )
+        dataset[key] = candidate
+
+    matches = process.extract(
+        term,
+        dataset,
+        scorer=fuzz.WRatio,
+        processor=None,
+        score_cutoff=70,
+        limit=200,
+    )
+
+    if not matches:
+        result_list.delete(0, tk.END)
+        result_list.insert(tk.END, "Kein Treffer")
+        return
+
     sorted_rows: List[sqlite3.Row] = []
     seen_keys: set[str] = set()
     for key, score, _value in sorted(matches, key=lambda item: item[1], reverse=True):
@@ -531,6 +789,28 @@ def run_search(event: Optional[tk.Event] = None) -> None:
         seen_keys.add(key)
 
     populate_result_list(sorted_rows, empty_message="Kein Treffer")
+    result_list.delete(0, tk.END)
+    reset_zone_colors()
+    seen_zones = set()
+    for row in sorted_rows:
+        zone = row.get("zone") or "-"
+        name = (row.get("name") or "").strip()
+        timestamp = row.get("received_at") or ""
+        score = row.get("score")
+        label = f"{row['sendungsnr']}"
+        if name:
+            label += f" — {name}"
+        label += f" → {zone}"
+        if timestamp:
+            label += f" ({timestamp})"
+        if score is not None:
+            label += f"  [Score {score}]"
+        result_list.insert(tk.END, label)
+        if row.get("zone"):
+            seen_zones.add(row["zone"])
+
+    for zone in seen_zones:
+        highlight_zone(zone, "red")
 
 
 def delete_selected() -> None:
@@ -558,6 +838,9 @@ def on_result_select(_event: tk.Event) -> None:
         return
     zone = result_rows[sel[0]].get("zone") or ""
     refresh_zone_highlights(zone if zone else None)
+
+
+    log(f"{sendungsnr} gelöscht")
 
 
 # --- CSV Synchronisation ---------------------------------------------------
@@ -652,6 +935,7 @@ def build_gui() -> None:
     global app, search_var, zone_var, counter_var
     global search_entry, result_list, log_list, warning_label, einbuchen_btn
     global counter_value_lbl, counter_frame, result_panel, style
+    global counter_value_lbl
 
     app = ttk.Window(title="Paket-Zonen-Manager", themename="flatly")
     app.geometry("1280x800")
@@ -698,6 +982,27 @@ def build_gui() -> None:
         font=("Arial", 20),
         style="White.TLabel",
     ).grid(row=0, column=0, sticky=tk.W, padx=(0, 12))
+    top = ttk.Frame(app, padding=16)
+    top.pack(fill=tk.X)
+
+    ttk.Label(top, textvariable=zone_var, font=("Arial", 26, "bold"), anchor=tk.W).pack(
+        side=tk.LEFT, fill=tk.X, expand=True
+    )
+
+    counter_frame = ttk.Frame(top)
+    counter_frame.pack(side=tk.RIGHT)
+    ttk.Label(counter_frame, text="Eingebucht:", font=("Arial", 24, "bold"), foreground="black").pack(
+        side=tk.LEFT, padx=(0, 6)
+    )
+    counter_value_lbl = tk.Label(counter_frame, textvariable=counter_var, font=("Arial", 30, "bold"), fg=ARAL_RED, bg=top.cget("background"))
+    counter_value_lbl.pack(side=tk.LEFT)
+
+    # Eingabezeile
+    search_row = ttk.Frame(app, padding=(16, 0))
+    search_row.pack(fill=tk.X, pady=(0, 8))
+    ttk.Label(search_row, text="Eingabe (Scan / Suche):", font=("Arial", 20)).grid(
+        row=0, column=0, sticky=tk.W, padx=(0, 12)
+    )
     search_entry = ttk.Entry(search_row, textvariable=search_var, font=("Consolas", 28), width=24)
     search_entry.grid(row=0, column=1, sticky=tk.W)
     search_entry.bind("<Return>", handle_scan_or_enter)
@@ -743,6 +1048,9 @@ def build_gui() -> None:
     ctrl.grid_columnconfigure(0, weight=1)
     ctrl.grid_rowconfigure(0, weight=0)
     ctrl.grid_rowconfigure(1, weight=1)
+    ctrl.grid(row=0, column=3, columnspan=2, sticky="nsew", padx=14, pady=(0, 8))
+    for j in range(2):
+        ctrl.grid_columnconfigure(j, weight=1)
 
     global zone_buttons
     zone_buttons = {}
@@ -837,6 +1145,49 @@ def build_gui() -> None:
 
     # Aktionen
     actions = ttk.Frame(app, padding=(16, 8), style="White.TFrame")
+    einbuchen_btn.grid(row=0, column=0, columnspan=2, sticky="nsew", ipadx=10, ipady=10)
+
+    # Helper zum Erzeugen der Buttons
+    def make_zone_btn(name: str, r: int, c: int, colspan: int = 1, font_size: int = 48) -> tk.Button:
+        btn = tk.Button(
+            grid,
+            text=name,
+            command=lambda z=name: set_zone(z),
+            font=("Arial", font_size, "bold"),
+            bg=WHITE,
+            fg=ARAL_BLUE,
+            activebackground=WHITE,
+            activeforeground=ARAL_BLUE,
+            relief="solid",
+            bd=4,
+        )
+        btn.grid(row=r, column=c, columnspan=colspan, padx=12, pady=12, sticky="nsew")
+        zone_buttons[name] = btn
+        return btn
+
+    make_zone_btn("A", 1, 0, colspan=3)
+    make_zone_btn("B", 2, 0, colspan=3)
+    make_zone_btn("C", 3, 0, colspan=3)
+    make_zone_btn("D", 4, 0, colspan=3)
+
+    make_zone_btn("E-1", 5, 0, font_size=42)
+    make_zone_btn("E-2", 5, 1, font_size=42)
+    make_zone_btn("E-3", 5, 2, font_size=42)
+    make_zone_btn("E-4", 5, 3, font_size=42)
+    make_zone_btn("F", 5, 4, font_size=42)
+
+    # Ergebnis- und Loglisten
+    lists = ttk.Frame(app, padding=(16, 8))
+    lists.pack(fill=tk.BOTH, expand=True)
+
+    result_list = tk.Listbox(lists, font=("Consolas", 18), height=7)
+    result_list.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(0, 12))
+
+    log_list = tk.Listbox(lists, font=("Consolas", 14), height=7)
+    log_list.pack(fill=tk.BOTH, expand=True, side=tk.RIGHT)
+
+    # Aktionen
+    actions = ttk.Frame(app, padding=(16, 8))
     actions.pack(fill=tk.X)
 
     ttk.Button(actions, text="Treffer löschen", bootstyle="danger", command=delete_selected).pack(
@@ -853,6 +1204,12 @@ def build_gui() -> None:
     show_result_panel(True)
     display_packages(fetch_all_packages())
     update_counter_label()
+    ttk.Button(actions, text="Alle anzeigen", bootstyle="secondary", command=lambda: (search_var.set(""), run_search())).pack(
+        side=tk.LEFT
+    )
+
+    # Initiale Daten anzeigen
+    display_packages(fetch_all_packages())
     ensure_focus()
 
     # periodische Syncs starten
