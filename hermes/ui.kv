@@ -2,6 +2,8 @@
 
 # --- Zeilenobjekt für Ergebnisliste ---
 <SelectableRow@Label>:
+    index: -1
+    selected: True if app.selected_index >= 0 and app.selected_index == self.index else False
     size_hint_y: None
     height: dp(56)
     padding: dp(16), dp(16)
@@ -174,11 +176,17 @@
             size_hint_x: None
             width: dp(500)
             on_text_validate: app.on_text_validate()
+            on_text: app.on_scanner_text(self.text)
         Button:
             text: "Suchen"
             size_hint_x: None
             width: dp(160)
             on_release: app.on_search_button()
+        Button:
+            text: "Clear"
+            size_hint_x: None
+            width: dp(140)
+            on_release: app.on_clear_button()
 
     # Hauptbereich
     BoxLayout:
@@ -320,3 +328,4 @@
                         on_release: app.on_all_button()
 
 Root:
+    rv.data: app.result_items
