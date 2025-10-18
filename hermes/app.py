@@ -6,9 +6,13 @@ import sqlite3
 import csv
 import io
 import threading
+import hashlib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import List, Dict, Optional, Sequence, Tuple, Any
+from urllib.parse import urljoin, unquote
+from xml.etree import ElementTree as ET
 
 import requests
 from rapidfuzz import fuzz, process
@@ -40,11 +44,13 @@ Window.maximum_width, Window.maximum_height = 1280, 800
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "paket.db")
-CSV_URL = (
-    "https://nextcloud.aralbruehl.de/public.php/dav/files/"
-    "mJAaPjgBycC7d7y/hermes_final.csv"
+CSV_COLLECTION_URL = os.environ.get(
+    "HERMES_CSV_COLLECTION",
+    "https://nextcloud.aralbruehl.de/public.php/dav/files/HMMEZAB25as8mbM/",
 )
+CSV_STATIC_FILE = os.environ.get("HERMES_CSV_FILE")
 SYNC_INTERVAL_SECONDS = 30
+DEFAULT_MODIFIED = datetime.min.replace(tzinfo=timezone.utc)
 
 # --- Datenmodell / DB ---
 DB_LOCK = threading.Lock()
@@ -93,6 +99,23 @@ class DirectoryEntry:
 directory_cache: Dict[str, DirectoryEntry] = {}
 directory_choices: List[str] = []
 
+
+@dataclass
+class RemoteFileInfo:
+    href: str
+    url: str
+    etag: Optional[str]
+    modified: Optional[datetime]
+    name: str
+
+
+remote_sync_state: Dict[str, Optional[str]] = {
+    "href": None,
+    "etag": None,
+    "hash": None,
+    "modified": None,
+}
+
 def rebuild_directory_cache() -> None:
     global directory_cache, directory_choices
     with DB_LOCK:
@@ -109,6 +132,217 @@ def rebuild_directory_cache() -> None:
 rebuild_directory_cache()
 
 # --- CSV Sync ---
+def _current_app() -> Optional[App]:
+    try:
+        return App.get_running_app()
+    except Exception:
+        return None
+
+
+def log_sync_message(message: str) -> None:
+    app = _current_app()
+    if app:
+        app.log_async(message)
+
+
+def parse_webdav_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        dt = parsedate_to_datetime(value)
+    except Exception:
+        return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def list_remote_csv_files() -> List[RemoteFileInfo]:
+    if not CSV_COLLECTION_URL:
+        return []
+    try:
+        response = requests.request(
+            "PROPFIND",
+            CSV_COLLECTION_URL,
+            data=(
+                """
+                <d:propfind xmlns:d="DAV:">
+                    <d:prop>
+                        <d:getetag />
+                        <d:getlastmodified />
+                        <d:resourcetype />
+                        <d:displayname />
+                    </d:prop>
+                </d:propfind>
+                """
+            ).strip(),
+            headers={"Depth": "1", "Content-Type": "text/xml"},
+            timeout=20,
+        )
+    except Exception as exc:
+        log_sync_message(f"CSV Sync Fehler: {exc}")
+        return []
+
+    if response.status_code not in (200, 207):
+        log_sync_message(
+            f"CSV Sync: PROPFIND fehlgeschlagen ({response.status_code})"
+        )
+        return []
+
+    try:
+        xml_root = ET.fromstring(response.content)
+    except ET.ParseError as exc:
+        log_sync_message(f"CSV Sync: XML-Parsing fehlgeschlagen ({exc})")
+        return []
+
+    ns = {"d": "DAV:"}
+    files: List[RemoteFileInfo] = []
+    for response_node in xml_root.findall("d:response", ns):
+        href = response_node.findtext("d:href", default="", namespaces=ns)
+        if not href:
+            continue
+        propstat = response_node.find("d:propstat", ns)
+        if propstat is None:
+            continue
+        prop = propstat.find("d:prop", ns)
+        if prop is None:
+            continue
+        res_type = prop.find("d:resourcetype", ns)
+        if res_type is not None and res_type.find("d:collection", ns) is not None:
+            continue
+        filename = unquote(href.rstrip("/").split("/")[-1])
+        if not filename.lower().endswith(".csv"):
+            continue
+        etag = prop.findtext("d:getetag", default=None, namespaces=ns)
+        last_modified = parse_webdav_datetime(
+            prop.findtext("d:getlastmodified", default=None, namespaces=ns)
+        )
+        files.append(
+            RemoteFileInfo(
+                href=href,
+                url=urljoin(CSV_COLLECTION_URL, href),
+                etag=etag.strip('"') if etag else None,
+                modified=last_modified,
+                name=filename,
+            )
+        )
+    return files
+
+
+def choose_remote_file(files: Sequence[RemoteFileInfo]) -> Optional[RemoteFileInfo]:
+    if not files:
+        return None
+    if CSV_STATIC_FILE:
+        filename = os.path.basename(CSV_STATIC_FILE)
+        for file_info in files:
+            if file_info.name == filename:
+                return file_info
+    return max(
+        files,
+        key=lambda item: (item.modified or DEFAULT_MODIFIED, item.name),
+    )
+
+
+def download_remote_csv(file_info: RemoteFileInfo) -> Optional[Tuple[str, str]]:
+    try:
+        response = requests.get(file_info.url, timeout=20)
+    except Exception as exc:
+        log_sync_message(f"CSV Download Fehler: {exc}")
+        return None
+    if response.status_code != 200:
+        log_sync_message(
+            f"CSV Download fehlgeschlagen ({response.status_code}) für {file_info.name}"
+        )
+        return None
+    encoding = response.encoding or response.apparent_encoding or "utf-8"
+    try:
+        text = response.content.decode(encoding)
+    except Exception:
+        text = response.text
+    digest = hashlib.sha256(response.content).hexdigest()
+    return text, digest
+
+
+def download_csv_direct(url: str) -> Optional[Tuple[str, str]]:
+    try:
+        response = requests.get(url, timeout=20)
+    except Exception as exc:
+        log_sync_message(f"CSV Download Fehler: {exc}")
+        return None
+    if response.status_code != 200:
+        log_sync_message(f"CSV Download fehlgeschlagen ({response.status_code})")
+        return None
+    encoding = response.encoding or response.apparent_encoding or "utf-8"
+    try:
+        text = response.content.decode(encoding)
+    except Exception:
+        text = response.text
+    digest = hashlib.sha256(response.content).hexdigest()
+    return text, digest
+
+
+def fetch_remote_csv() -> Optional[str]:
+    files = list_remote_csv_files()
+    if not files:
+        direct_url = CSV_STATIC_FILE or (
+            CSV_COLLECTION_URL
+            if CSV_COLLECTION_URL and CSV_COLLECTION_URL.lower().endswith(".csv")
+            else None
+        )
+        if not direct_url:
+            log_sync_message("CSV Sync: keine CSV-Datei gefunden")
+            return None
+        result = download_csv_direct(direct_url)
+        if not result:
+            return None
+        text, digest = result
+        if remote_sync_state.get("hash") == digest:
+            return None
+        remote_sync_state.update(
+            {
+                "href": direct_url,
+                "etag": None,
+                "hash": digest,
+                "modified": None,
+            }
+        )
+        return text
+    target = choose_remote_file(files)
+    if not target:
+        return None
+
+    if (
+        remote_sync_state.get("href") == target.href
+        and remote_sync_state.get("etag")
+        and target.etag
+        and remote_sync_state.get("etag") == target.etag
+    ):
+        return None
+
+    result = download_remote_csv(target)
+    if not result:
+        return None
+    text, digest = result
+
+    if (
+        remote_sync_state.get("href") == target.href
+        and remote_sync_state.get("hash") == digest
+    ):
+        return None
+
+    remote_sync_state.update(
+        {
+            "href": target.href,
+            "etag": target.etag,
+            "hash": digest,
+            "modified": target.modified.isoformat() if target.modified else None,
+        }
+    )
+    return text
+
+
 def parse_csv(content: str) -> List[Tuple[str, str]]:
     reader = csv.DictReader(io.StringIO(content))
     entries: List[Tuple[str, str]] = []
@@ -140,16 +374,6 @@ def parse_csv(content: str) -> List[Tuple[str, str]]:
         entries.append((sendungsnr.strip(), name))
     return entries
 
-def download_csv() -> Optional[str]:
-    try:
-        r = requests.get(CSV_URL, timeout=15)
-        if r.status_code == 200:
-            r.encoding = r.apparent_encoding or "utf-8"
-            return r.text
-    except Exception as exc:
-        App.get_running_app().log_async(f"CSV Sync Fehler: {exc}")
-    return None
-
 def sync_directory(entries: Sequence[Tuple[str, str]]) -> None:
     ts = datetime.now().isoformat(timespec="seconds")
     with DB_LOCK:
@@ -162,7 +386,7 @@ def sync_directory(entries: Sequence[Tuple[str, str]]) -> None:
     rebuild_directory_cache()
 
 def perform_sync() -> None:
-    content = download_csv()
+    content = fetch_remote_csv()
     if not content:
         return
     entries = parse_csv(content)
@@ -173,9 +397,6 @@ def perform_sync() -> None:
     App.get_running_app().log_async(f"CSV Sync abgeschlossen ({len(entries)} Einträge)")
 
 # --- Kivy App ---
-class LogView(ModalView):
-    pass
-
 class HermesApp(App):
     title = "Paket-Zonen-Manager"
     zone_status = StringProperty("Suche aktiv")
@@ -188,6 +409,7 @@ class HermesApp(App):
     selected_index = NumericProperty(-1)
     show_warning = BooleanProperty(False)
     _warning_event = ObjectProperty(allownone=True)
+    search_trigger = ObjectProperty(allownone=True)
 
     log_lines = ListProperty([])          # for overlay
     max_log_lines = 400
@@ -227,6 +449,24 @@ class HermesApp(App):
             self.root.ids.scanner_input.cursor = (len(self.root.ids.scanner_input.text), 0)
         except Exception:
             pass
+
+    def cancel_search_trigger(self):
+        if self.search_trigger is not None:
+            try:
+                self.search_trigger.cancel()
+            except Exception:
+                pass
+            self.search_trigger = None
+
+    def on_scanner_text(self, text: str):
+        if self.einbuchen_mode:
+            return
+        self.cancel_search_trigger()
+        self.search_trigger = Clock.schedule_once(self._perform_live_search, 0.25)
+
+    def _perform_live_search(self, _dt):
+        self.search_trigger = None
+        self.run_search()
 
     # --- UI Bindings ---
     def update_counter_label(self):
@@ -296,6 +536,7 @@ class HermesApp(App):
         self.active_zone = ""
         self.refresh_zone_highlights()
         self.hide_zone_warning()
+        self.cancel_search_trigger()
         if self.einbuchen_mode:
             self.session_counter = 0
             self.zone_status = "Einbuchen aktiv – bitte Zone wählen"
@@ -411,12 +652,14 @@ class HermesApp(App):
 
     def display_packages(self, rows: Sequence[sqlite3.Row]):
         self.populate_result_list([dict(r) for r in rows], empty_message="Keine Pakete vorhanden")
+        self.update_selection_after_search()
 
     def run_search(self):
         term = self.root.ids.scanner_input.text.strip()
         rows = self.fetch_all_packages()
         if not rows:
             self.populate_result_list([], empty_message="Keine Pakete vorhanden")
+            self.update_selection_after_search()
             return
         if not term:
             self.display_packages(rows)
@@ -440,6 +683,7 @@ class HermesApp(App):
         )
         if not matches:
             self.populate_result_list([], empty_message="Kein Treffer")
+            self.update_selection_after_search()
             return
 
         sorted_rows: List[sqlite3.Row] = []
@@ -456,10 +700,29 @@ class HermesApp(App):
             seen_keys.add(key)
 
         self.populate_result_list(sorted_rows, empty_message="Kein Treffer")
+        self.update_selection_after_search()
+
+    def update_selection_after_search(self):
+        if not self.result_rows:
+            self.selected_index = -1
+            self.refresh_zone_highlights(None)
+            return
+        if len(self.result_rows) == 1:
+            self.selected_index = 0
+            zone = self.result_rows[0].get("zone") or None
+            self.refresh_zone_highlights(zone)
+            return
+        if 0 <= self.selected_index < len(self.result_rows):
+            zone = self.result_rows[self.selected_index].get("zone") or None
+            self.refresh_zone_highlights(zone if zone else None)
+        else:
+            self.selected_index = -1
+            self.refresh_zone_highlights(None)
 
     # --- UI events ---
     def on_text_validate(self):  # Enter gedrückt
         value = self.root.ids.scanner_input.text.strip()
+        self.cancel_search_trigger()
         if not value:
             if not self.einbuchen_mode:
                 self.run_search()
@@ -492,11 +755,19 @@ class HermesApp(App):
         self.run_search()
 
     def on_search_button(self):
+        self.cancel_search_trigger()
         self.run_search()
         self.ensure_focus()
 
     def on_all_button(self):
         self.root.ids.scanner_input.text = ""
+        self.cancel_search_trigger()
+        self.run_search()
+        self.ensure_focus()
+
+    def on_clear_button(self):
+        self.root.ids.scanner_input.text = ""
+        self.cancel_search_trigger()
         self.run_search()
         self.ensure_focus()
 
@@ -520,6 +791,7 @@ class HermesApp(App):
             return
         zone = self.result_rows[idx].get("zone") or ""
         self.refresh_zone_highlights(zone if zone else None)
+        self.ensure_focus()
 
     # --- Sync scheduling ---
     def schedule_sync(self):
