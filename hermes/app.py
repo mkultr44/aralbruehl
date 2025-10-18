@@ -1,66 +1,42 @@
 #!/usr/bin/env python3
-"""Paket-Zonen-Manager
-
-Tkinter/ttkbootstrap-Oberfläche zum schnellen Erfassen von Paketen in
-Lagerzonen. Kernfunktionen:
-
-* Einbuchen über Scanner mit fuzzy Zuordnung von Namen (RapidFuzz)
-* Periodische Synchronisation eines Nextcloud-Exports in die lokale
-  SQLite-Datenbank
-* Live-Suche mit fuzzy Matching
-* Session-Counter und visuelle Zonensteuerung
-"""
-
 from __future__ import annotations
 
-import argparse
-import csv
-import io
-import importlib
 import os
 import sqlite3
+import csv
+import io
 import threading
-import tkinter as tk
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import List, Dict, Optional, Sequence, Tuple, Any
 
-import ttkbootstrap as ttk
-
-
-def _ensure_ttkbootstrap_text_style() -> None:
-    """Patch ttkbootstrap for releases lacking StyleBuilderTTK.create_text_style."""
-
-    module_names = (
-        "ttkbootstrap.style.builder",
-        "ttkbootstrap.style_builder",
-    )
-    builder_cls = None
-    for module_name in module_names:
-        try:
-            module = importlib.import_module(module_name)
-        except ModuleNotFoundError:
-            continue
-        builder_cls = getattr(module, "StyleBuilderTTK", None)
-        if builder_cls:
-            break
-    if not builder_cls or hasattr(builder_cls, "create_text_style"):
-        return
-
-    def _create_text_style(self, *args, **kwargs):
-        # Fallback: reuse the entry style so text widgets keep a sensible theme.
-        if hasattr(self, "create_entry_style"):
-            return self.create_entry_style(*args, **kwargs)
-        style_name = kwargs.get("style_name") if isinstance(kwargs, dict) else None
-        return style_name or "TText"
-
-    setattr(builder_cls, "create_text_style", _create_text_style)
-
-
-_ensure_ttkbootstrap_text_style()
+import requests
 from rapidfuzz import fuzz, process
 
-# --- Pfade & Konstanten ----------------------------------------------------
+from kivy.app import App
+from kivy.lang import Builder
+from kivy.properties import (
+    StringProperty,
+    BooleanProperty,
+    NumericProperty,
+    ListProperty,
+    ObjectProperty,
+)
+from kivy.clock import Clock
+from kivy.uix.modalview import ModalView
+from kivy.core.window import Window
+
+# --- Konstanten / Farben ---
+ARAL_BLUE = "#0078D7"
+ARAL_RED = "#D00000"
+ARAL_GREEN = "#009F4D"
+WHITE = "#FFFFFF"
+TEXT_DARK = "#0A0A0A"
+
+# Fenstergröße fix (Touch-Optimierung)
+Window.size = (1280, 800)
+Window.minimum_width, Window.minimum_height = 1280, 800
+Window.maximum_width, Window.maximum_height = 1280, 800
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "paket.db")
@@ -70,26 +46,14 @@ CSV_URL = (
 )
 SYNC_INTERVAL_SECONDS = 30
 
-ARAL_BLUE = "#0078D7"
-ARAL_RED = "#D00000"
-ARAL_GREEN = "#009F4D"
-WHITE = "#FFFFFF"
-TEXT_DARK = "#0A0A0A"
-
-os.makedirs(BASE_DIR, exist_ok=True)
-
-
-# --- Datenmodell -----------------------------------------------------------
-
+# --- Datenmodell / DB ---
 DB_LOCK = threading.Lock()
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 conn.row_factory = sqlite3.Row
 
-
 def _column_exists(table: str, column: str) -> bool:
     cur = conn.execute(f"PRAGMA table_info({table})")
     return any(row[1] == column for row in cur.fetchall())
-
 
 def init_db() -> None:
     with DB_LOCK:
@@ -118,21 +82,16 @@ def init_db() -> None:
             conn.execute("ALTER TABLE directory ADD COLUMN name TEXT")
         conn.commit()
 
-
 init_db()
 
-
-# --- Directory-Cache -------------------------------------------------------
-
+# --- Directory Cache ---
 @dataclass
 class DirectoryEntry:
     sendungsnr: str
     name: str
 
-
 directory_cache: Dict[str, DirectoryEntry] = {}
 directory_choices: List[str] = []
-
 
 def rebuild_directory_cache() -> None:
     global directory_cache, directory_choices
@@ -142,461 +101,14 @@ def rebuild_directory_cache() -> None:
         ).fetchall()
     cache = {
         row["sendungsnr"]: DirectoryEntry(row["sendungsnr"], row["name"].strip())
-        for row in rows
-        if row["sendungsnr"]
+        for row in rows if row["sendungsnr"]
     }
     directory_cache = cache
     directory_choices = list(cache.keys())
 
-
 rebuild_directory_cache()
 
-
-# --- Tkinter Widgets (wird später initialisiert) ---------------------------
-
-app: ttk.Window
-search_var: tk.StringVar
-zone_var: tk.StringVar
-counter_var: tk.StringVar
-search_entry: ttk.Entry
-result_list: tk.Listbox
-log_list: tk.Listbox
-warning_label: tk.Label
-einbuchen_btn: tk.Button
-counter_value_lbl: tk.Label
-counter_frame: ttk.Frame
-result_panel: ttk.Frame
-style: ttk.Style
-
-
-# --- UI State --------------------------------------------------------------
-
-active_zone: Optional[str] = None
-einbuchen_mode: bool = False
-zone_buttons: Dict[str, tk.Button] = {}
-session_counter: int = 0
-warning_job: Optional[str] = None
-result_rows: List[Dict[str, str]] = []
-
-
-# --- Hilfsfunktionen -------------------------------------------------------
-
-
-def log(msg: str) -> None:
-    """Nachricht in der Log-Liste anzeigen."""
-
-    if "log_list" not in globals():
-        return
-    ts = datetime.now().strftime("%H:%M:%S")
-    log_list.insert(0, f"[{ts}] {msg}")
-    if log_list.size() > 400:
-        log_list.delete(400, tk.END)
-
-
-def log_async(msg: str) -> None:
-    if "app" not in globals():
-        return
-    app.after(0, lambda: log(msg))
-
-
-def ensure_focus() -> None:
-    if "search_entry" in globals():
-        search_entry.focus_set()
-        search_entry.icursor(tk.END)
-
-
-def init_styles() -> ttk.Style:
-    """Initialisiert ttk Styles für ein konsistentes Erscheinungsbild."""
-
-    style = ttk.Style()
-    style.configure("White.TFrame", background=WHITE)
-    style.configure("White.TLabel", background=WHITE, foreground=TEXT_DARK)
-    style.configure(
-        "Header.TLabel",
-        background=WHITE,
-        foreground=TEXT_DARK,
-        font=("Arial", 20, "bold"),
-    )
-    style.configure(
-        "CounterText.TLabel",
-        background=WHITE,
-        foreground="black",
-        font=("Arial", 24, "bold"),
-    )
-    return style
-
-
-def apply_listbox_theme(widget: tk.Listbox) -> None:
-    """Sorgt für weiße Hintergründe und Aral-Auswahlfarben in Listboxen."""
-
-    widget.configure(
-        activestyle="none",
-        background=WHITE,
-        borderwidth=0,
-        fg=TEXT_DARK,
-        highlightbackground=ARAL_BLUE,
-        highlightcolor=ARAL_BLUE,
-        highlightthickness=1,
-        relief="flat",
-        selectbackground=ARAL_BLUE,
-        selectforeground=WHITE,
-    )
-
-
-def update_counter_label() -> None:
-    counter_var.set(str(session_counter))
-    color = ARAL_RED if session_counter == 0 else ARAL_GREEN
-    counter_value_lbl.config(fg=color)
-
-
-def reset_zone_colors() -> None:
-    for btn in zone_buttons.values():
-        btn.config(bg=WHITE, fg=ARAL_BLUE, activebackground=WHITE, activeforeground=ARAL_BLUE)
-
-
-def refresh_zone_highlights(selected_zone: Optional[str] = None) -> None:
-    reset_zone_colors()
-    if einbuchen_mode and active_zone:
-        highlight_zone(active_zone, "blue")
-    if selected_zone:
-        highlight_zone(selected_zone, "red")
-
-
-def show_result_panel(show: bool) -> None:
-    if "result_panel" not in globals():
-        return
-    if show:
-        result_panel.grid()
-    else:
-        result_panel.grid_remove()
-    if "result_list" in globals() and not show:
-        result_list.selection_clear(0, tk.END)
-
-
-def highlight_zone(zone: str, color: str) -> None:
-    btn = zone_buttons.get(zone)
-    if not btn:
-        return
-    if color == "blue":
-        btn.config(bg=ARAL_BLUE, fg=WHITE, activebackground=ARAL_BLUE, activeforeground=WHITE)
-    elif color == "red":
-        btn.config(bg=ARAL_RED, fg=WHITE, activebackground=ARAL_RED, activeforeground=WHITE)
-
-
-def hide_zone_warning() -> None:
-    global warning_job
-    if "warning_label" not in globals():
-        return
-    warning_label.grid_remove()
-    if warning_job is not None:
-        app.after_cancel(warning_job)
-        warning_job = None
-
-
-def blink_warning(state: bool = True) -> None:
-    global warning_job
-    if "warning_label" not in globals():
-        return
-    warning_label.config(bg=ARAL_RED if state else WHITE, fg=WHITE if state else ARAL_RED)
-    warning_job = app.after(400, blink_warning, not state)
-
-
-def show_zone_warning() -> None:
-    if "warning_label" not in globals():
-        return
-    warning_label.grid()
-    blink_warning(True)
-
-
-def set_zone(zone: str) -> None:
-    global active_zone
-    if not einbuchen_mode:
-        return
-    active_zone = zone
-    hide_zone_warning()
-    refresh_zone_highlights()
-    zone_var.set(f"Aktive Zone: {active_zone}")
-    log(f"Zone {active_zone} gewählt")
-    ensure_focus()
-
-
-def toggle_einbuchen() -> None:
-    global einbuchen_mode, active_zone, session_counter
-    einbuchen_mode = not einbuchen_mode
-    active_zone = None
-    refresh_zone_highlights()
-    hide_zone_warning()
-    if einbuchen_mode:
-        session_counter = 0
-        zone_var.set("Einbuchen aktiv – bitte Zone wählen")
-        einbuchen_btn.config(
-            text="Fertig",
-            bg=ARAL_RED,
-            fg=WHITE,
-            activebackground=ARAL_RED,
-            activeforeground=WHITE,
-        )
-        counter_frame.pack(side=tk.RIGHT)
-        show_result_panel(False)
-        log("Einbuchen gestartet")
-    else:
-        session_counter = 0
-        zone_var.set("Suche aktiv")
-        einbuchen_btn.config(
-            text="Einbuchen",
-            bg=ARAL_BLUE,
-            fg=WHITE,
-            activebackground=ARAL_BLUE,
-            activeforeground=WHITE,
-        )
-        counter_frame.pack_forget()
-        show_result_panel(True)
-        run_search()
-        log("Einbuchen beendet")
-    update_counter_label()
-    ensure_focus()
-
-
-def match_directory(sendungsnr: str) -> Tuple[Optional[str], Sequence[str], Optional[int]]:
-    """Fuzzy-Abgleich der Sendungsnummer gegen den Directory-Cache."""
-
-    if not sendungsnr:
-        return None, [], None
-
-    key = sendungsnr.strip()
-    entry = directory_cache.get(key)
-    if entry:
-        return entry.name or None, [key], 100
-
-    if not directory_choices:
-        return None, [], None
-
-    matches = process.extract(
-        key,
-        directory_choices,
-        scorer=fuzz.WRatio,
-        processor=None,
-        score_cutoff=85,
-        limit=6,
-    )
-    if not matches:
-        return None, [], None
-
-    best_score = matches[0][1]
-    best_key = matches[0][0]
-    matched_keys = [choice for choice, _score, *_ in matches]
-
-    if best_score >= 90:
-        name = directory_cache.get(best_key)
-        return (name.name if name else None), matched_keys, best_score
-
-    plausible_names = {
-        directory_cache[choice].name
-        for choice, score, *_ in matches
-        if 85 <= score <= 95 and choice in directory_cache and directory_cache[choice].name
-    }
-    combined = " / ".join(sorted(plausible_names)) if plausible_names else None
-    return combined or None, matched_keys, best_score
-
-
-def insert_package(sendungsnr: str, zone: str, name: Optional[str]) -> None:
-    ts = datetime.now().isoformat(timespec="seconds")
-    with DB_LOCK:
-        conn.execute(
-            """
-            INSERT INTO packages (sendungsnr, zone, received_at, name)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(sendungsnr) DO UPDATE SET
-                zone=excluded.zone,
-                received_at=excluded.received_at,
-                name=excluded.name
-            """,
-            (sendungsnr, zone, ts, name),
-        )
-        conn.commit()
-
-
-def handle_scan_or_enter(event: Optional[tk.Event] = None) -> str:
-    global session_counter
-    value = search_var.get().strip()
-
-    if not value:
-        if not einbuchen_mode:
-            run_search()
-        return "break"
-
-    if einbuchen_mode:
-        if not active_zone:
-            log("Zone auswählen, bevor eingebucht wird")
-            show_zone_warning()
-            ensure_focus()
-            return "break"
-        name, matches, score = match_directory(value)
-        insert_package(value, active_zone, name)
-        session_counter += 1
-        update_counter_label()
-        log_msg = f"{value} → {active_zone}"
-        if name:
-            log_msg += f" ({name})"
-        if score is not None:
-            log_msg += f" [Score {score}]"
-        elif matches:
-            log_msg += " [Mehrfachtreffer]"
-        log(log_msg)
-        if matches and len(matches) > 1:
-            log(f"Fuzzy Matches: {', '.join(matches)}")
-        search_var.set("")
-        ensure_focus()
-        return "break"
-
-    run_search()
-    return "break"
-
-
-def fetch_all_packages() -> List[sqlite3.Row]:
-    with DB_LOCK:
-        rows = conn.execute(
-            """
-            SELECT sendungsnr,
-                   COALESCE(name, '') AS name,
-                   COALESCE(zone, '') AS zone,
-                   COALESCE(received_at, '') AS received_at
-            FROM packages
-            ORDER BY datetime(received_at) DESC
-            LIMIT 500
-            """
-        ).fetchall()
-    return list(rows)
-
-
-def populate_result_list(
-    items: Sequence[Mapping[str, Any]], *, empty_message: str
-) -> None:
-    result_rows.clear()
-    if "result_list" not in globals():
-        return
-    result_list.delete(0, tk.END)
-    refresh_zone_highlights()
-
-    if not items:
-        result_list.insert(tk.END, empty_message)
-        return
-
-    for item in items:
-        sendungsnr = str(item.get("sendungsnr") or "").strip()
-        if not sendungsnr:
-            continue
-        name = str(item.get("name") or "").strip()
-        zone = str(item.get("zone") or "").strip()
-        timestamp = str(item.get("received_at") or "").strip()
-        score = item.get("score")
-
-        label = f"{sendungsnr}"
-        if name:
-            label += f" — {name}"
-        label += f" → {zone or '-'}"
-        if timestamp:
-            label += f" ({timestamp})"
-        if score is not None and score != "":
-            label += f"  [Score {score}]"
-
-        result_list.insert(tk.END, label)
-        result_rows.append({
-            "sendungsnr": sendungsnr,
-            "zone": zone,
-        })
-
-    if not result_rows and result_list.size() == 0:
-        result_list.insert(tk.END, empty_message)
-
-
-def display_packages(rows: Iterable[sqlite3.Row]) -> None:
-    populate_result_list([dict(row) for row in rows], empty_message="Keine Pakete vorhanden")
-
-
-def run_search(event: Optional[tk.Event] = None) -> None:
-    term = search_var.get().strip()
-    rows = fetch_all_packages()
-
-    if not rows:
-        populate_result_list([], empty_message="Keine Pakete vorhanden")
-        return
-
-    if not term:
-        display_packages(rows)
-        return
-
-    choices: Dict[str, sqlite3.Row] = {}
-    dataset: Dict[str, str] = {}
-    for row in rows:
-        key = row["sendungsnr"]
-        choices[key] = row
-        candidate = " ".join(
-            part
-            for part in (row["sendungsnr"], row["name"], row["zone"])
-            if part
-        )
-        dataset[key] = candidate
-
-    matches = process.extract(
-        term,
-        dataset,
-        scorer=fuzz.WRatio,
-        processor=None,
-        score_cutoff=70,
-        limit=200,
-    )
-
-    if not matches:
-        populate_result_list([], empty_message="Kein Treffer")
-        return
-
-    sorted_rows: List[sqlite3.Row] = []
-    seen_keys: set[str] = set()
-    for key, score, _value in sorted(matches, key=lambda item: item[1], reverse=True):
-        if key in seen_keys:
-            continue
-        row = choices.get(key)
-        if not row:
-            continue
-        row = dict(row)
-        row["score"] = score
-        sorted_rows.append(row)
-        seen_keys.add(key)
-
-    populate_result_list(sorted_rows, empty_message="Kein Treffer")
-
-
-def delete_selected() -> None:
-    sel = result_list.curselection()
-    if not sel:
-        return
-    line = result_list.get(sel[0])
-    if "→" not in line:
-        return
-    sendungsnr = line.split(" → ")[0].split(" — ")[0].strip()
-    with DB_LOCK:
-        conn.execute("DELETE FROM packages WHERE sendungsnr=?", (sendungsnr,))
-        conn.commit()
-    result_list.delete(sel[0])
-    if sel[0] < len(result_rows):
-        del result_rows[sel[0]]
-    refresh_zone_highlights()
-    log(f"{sendungsnr} gelöscht")
-
-
-def on_result_select(_event: tk.Event) -> None:
-    sel = result_list.curselection()
-    if not sel or sel[0] >= len(result_rows):
-        refresh_zone_highlights()
-        return
-    zone = result_rows[sel[0]].get("zone") or ""
-    refresh_zone_highlights(zone if zone else None)
-
-
-# --- CSV Synchronisation ---------------------------------------------------
-
-
+# --- CSV Sync ---
 def parse_csv(content: str) -> List[Tuple[str, str]]:
     reader = csv.DictReader(io.StringIO(content))
     entries: List[Tuple[str, str]] = []
@@ -628,35 +140,26 @@ def parse_csv(content: str) -> List[Tuple[str, str]]:
         entries.append((sendungsnr.strip(), name))
     return entries
 
-
 def download_csv() -> Optional[str]:
-    import requests
-
     try:
-        response = requests.get(CSV_URL, timeout=15)
-        if response.status_code == 200:
-            response.encoding = response.apparent_encoding or "utf-8"
-            return response.text
-        log_async(f"CSV Sync fehlgeschlagen (HTTP {response.status_code})")
-    except Exception as exc:  # pragma: no cover - reine Laufzeitdiagnose
-        log_async(f"CSV Sync Fehler: {exc}")
+        r = requests.get(CSV_URL, timeout=15)
+        if r.status_code == 200:
+            r.encoding = r.apparent_encoding or "utf-8"
+            return r.text
+    except Exception as exc:
+        App.get_running_app().log_async(f"CSV Sync Fehler: {exc}")
     return None
-
 
 def sync_directory(entries: Sequence[Tuple[str, str]]) -> None:
     ts = datetime.now().isoformat(timespec="seconds")
     with DB_LOCK:
         conn.execute("DELETE FROM directory")
         conn.executemany(
-            """
-            INSERT INTO directory (sendungsnr, name, updated_at)
-            VALUES (?, ?, ?)
-            """,
+            "INSERT INTO directory (sendungsnr, name, updated_at) VALUES (?, ?, ?)",
             ((sn, name, ts) for sn, name in entries),
         )
         conn.commit()
     rebuild_directory_cache()
-
 
 def perform_sync() -> None:
     content = download_csv()
@@ -664,261 +167,367 @@ def perform_sync() -> None:
         return
     entries = parse_csv(content)
     if not entries:
-        log_async("CSV Sync: keine Daten erhalten")
+        App.get_running_app().log_async("CSV Sync: keine Daten erhalten")
         return
     sync_directory(entries)
-    log_async(f"CSV Sync abgeschlossen ({len(entries)} Einträge)")
+    App.get_running_app().log_async(f"CSV Sync abgeschlossen ({len(entries)} Einträge)")
 
+# --- Kivy App ---
+class LogView(ModalView):
+    pass
 
-def schedule_sync() -> None:
-    def worker() -> None:
-        perform_sync()
-        app.after(SYNC_INTERVAL_SECONDS * 1000, schedule_sync)
+class HermesApp(App):
+    title = "Paket-Zonen-Manager"
+    zone_status = StringProperty("Suche aktiv")
+    einbuchen_mode = BooleanProperty(False)
+    active_zone = StringProperty("")
+    session_counter = NumericProperty(0)
+    counter_color = StringProperty(ARAL_RED)
+    result_items = ListProperty([])       # List[dict(text=..., index=...)] for RecycleView
+    result_rows = ListProperty([])        # List[dict(rowdata)]
+    selected_index = NumericProperty(-1)
+    show_warning = BooleanProperty(False)
+    _warning_event = ObjectProperty(allownone=True)
 
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
+    log_lines = ListProperty([])          # for overlay
+    max_log_lines = 400
 
+    def build(self):
+        from kivy.lang import Builder
+        root = Builder.load_file(os.path.join(os.path.dirname(__file__), "ui.kv"))
+        self.root = root
+        Clock.schedule_once(lambda dt: self._post_build(), 0.05)
+        Clock.schedule_once(lambda dt: self.schedule_sync(), 2.0)
+        return root
 
-# --- CLI -------------------------------------------------------------------
+    def _post_build(self):
+        self.update_counter_label()
+        self.display_packages(self.fetch_all_packages())
+        self.ensure_focus()
 
+    # --- Logging ---
+    def log(self, msg: str) -> None:
+        ts = datetime.now().strftime("%H:%M:%S")
+        line = f"[{ts}] {msg}"
+        self.log_lines.insert(0, line)
+        if len(self.log_lines) > self.max_log_lines:
+            del self.log_lines[self.max_log_lines:]
 
-def parse_cli_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Hermes Paket-Zonen-Manager")
-    parser.add_argument(
-        "--fullscreen",
-        action="store_true",
-        help="Startet die Anwendung im Vollbildmodus.",
-    )
-    return parser.parse_args()
+    def log_async(self, msg: str) -> None:
+        Clock.schedule_once(lambda dt: self.log(msg), 0)
 
+    def open_log_overlay(self):
+        view = LogView(size_hint=(0.9, 0.8), auto_dismiss=True)
+        view.open()
 
-# --- GUI Aufbau ------------------------------------------------------------
+    # --- Focus ---
+    def ensure_focus(self):
+        try:
+            self.root.ids.scanner_input.focus = True
+            self.root.ids.scanner_input.cursor = (len(self.root.ids.scanner_input.text), 0)
+        except Exception:
+            pass
 
+    # --- UI Bindings ---
+    def update_counter_label(self):
+        self.root.ids.header_counter.ids.counter_value_label.text = str(self.session_counter)
+        self.counter_color = ARAL_GREEN if self.session_counter > 0 else ARAL_RED
 
-def build_gui(*, fullscreen: bool = False) -> None:
-    global app, search_var, zone_var, counter_var
-    global search_entry, result_list, log_list, warning_label, einbuchen_btn
-    global counter_value_lbl, counter_frame, result_panel, style
+    def _reset_zone_colors(self):
+        for zid in ("A","B","C","D","E_1","E_2","E_3","E_4","F"):
+            btn = self.root.ids.get(f"zone_{zid}")
+            if btn:
+                btn.tone = "normal"
 
-    app = ttk.Window(title="Paket-Zonen-Manager", themename="flatly")
-    app.geometry("1280x800")
-    app.resizable(False, False)
-    app.configure(background=WHITE)
+    def _highlight_zone(self, zone: str, color: str):
+        zid = zone.replace("-", "_")
+        btn = self.root.ids.get(f"zone_{zid}")
+        if not btn:
+            return
+        btn.tone = "blue" if color == "blue" else "red"
 
-    if fullscreen:
-        app.after_idle(lambda: app.attributes("-fullscreen", True))
+    def refresh_zone_highlights(self, selected_zone: Optional[str] = None):
+        self._reset_zone_colors()
+        if self.einbuchen_mode and self.active_zone:
+            self._highlight_zone(self.active_zone, "blue")
+        if selected_zone:
+            self._highlight_zone(selected_zone, "red")
 
-    style = init_styles()
+    # --- Warning Blink ---
+    def _blink_warning(self, *args):
+        lbl = self.root.ids.zone_warning
+        if not self.show_warning:
+            lbl.opacity = 0
+            return
+        lbl.opacity = 1.0 if lbl.opacity == 0.2 else 0.2
+        self._warning_event = Clock.schedule_once(self._blink_warning, 0.4)
 
-    zone_var = tk.StringVar(value="Suche aktiv")
-    search_var = tk.StringVar()
-    counter_var = tk.StringVar(value="0")
+    def hide_zone_warning(self):
+        self.show_warning = False
+        lbl = self.root.ids.zone_warning
+        lbl.opacity = 0
+        if self._warning_event is not None:
+            try:
+                self._warning_event.cancel()
+            except Exception:
+                pass
+            self._warning_event = None
 
-    # Kopfzeile
-    top = ttk.Frame(app, padding=16, style="White.TFrame")
-    top.pack(fill=tk.X)
+    def show_zone_warning_label(self):
+        self.show_warning = True
+        lbl = self.root.ids.zone_warning
+        lbl.opacity = 1.0
+        if self._warning_event is None:
+            self._warning_event = Clock.schedule_once(self._blink_warning, 0.4)
 
-    ttk.Label(
-        top,
-        textvariable=zone_var,
-        font=("Arial", 26, "bold"),
-        anchor=tk.W,
-        style="White.TLabel",
-    ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+    # --- Zone Handling ---
+    def set_zone(self, zone: str):
+        if not self.einbuchen_mode:
+            return
+        self.active_zone = zone
+        self.hide_zone_warning()
+        self.refresh_zone_highlights()
+        self.zone_status = f"Aktive Zone: {self.active_zone}"
+        self.log(f"Zone {self.active_zone} gewählt")
+        self.ensure_focus()
 
-    counter_frame = ttk.Frame(top, style="White.TFrame")
-    ttk.Label(counter_frame, text="Eingebucht:", style="CounterText.TLabel").pack(
-        side=tk.LEFT, padx=(0, 6)
-    )
-    counter_value_lbl = tk.Label(
-        counter_frame,
-        textvariable=counter_var,
-        font=("Arial", 30, "bold"),
-        fg=ARAL_RED,
-        bg=WHITE,
-    )
-    counter_value_lbl.pack(side=tk.LEFT)
+    def toggle_einbuchen(self):
+        self.einbuchen_mode = not self.einbuchen_mode
+        self.active_zone = ""
+        self.refresh_zone_highlights()
+        self.hide_zone_warning()
+        if self.einbuchen_mode:
+            self.session_counter = 0
+            self.zone_status = "Einbuchen aktiv – bitte Zone wählen"
+            self.root.ids.einbuchen_btn.text = "Fertig"
+            self.log("Einbuchen gestartet")
+        else:
+            self.session_counter = 0
+            self.zone_status = "Suche aktiv"
+            self.root.ids.einbuchen_btn.text = "Einbuchen"
+            self.run_search()
+            self.log("Einbuchen beendet")
+        self.update_counter_label()
+        self.ensure_focus()
 
-    # Eingabezeile
-    search_row = ttk.Frame(app, padding=(16, 0), style="White.TFrame")
-    search_row.pack(fill=tk.X, pady=(0, 8))
-    ttk.Label(
-        search_row,
-        text="Eingabe (Scan / Suche):",
-        font=("Arial", 20),
-        style="White.TLabel",
-    ).grid(row=0, column=0, sticky=tk.W, padx=(0, 12))
-    search_entry = ttk.Entry(search_row, textvariable=search_var, font=("Consolas", 28), width=24)
-    search_entry.grid(row=0, column=1, sticky=tk.W)
-    search_entry.bind("<Return>", handle_scan_or_enter)
-    search_entry.focus_set()
-
-    ttk.Button(
-        search_row,
-        text="Suchen",
-        bootstyle="primary",
-        command=run_search,
-    ).grid(row=0, column=2, padx=(12, 0))
-
-    # Zonenbereich
-    zones_frame = tk.Frame(app, bg=WHITE, padx=16, pady=16)
-    zones_frame.pack(fill=tk.BOTH, expand=True)
-
-    grid = tk.Frame(zones_frame, bg=WHITE)
-    grid.pack(expand=True, fill=tk.BOTH)
-
-    for col in range(5):
-        weight = 2 if col <= 2 else 1
-        grid.grid_columnconfigure(col, weight=weight)
-    for row in range(6):
-        grid.grid_rowconfigure(row, weight=(0 if row == 0 else 1))
-
-    # Warnhinweis über Zone A
-    warning_label = tk.Label(
-        grid,
-        text="Zone auswählen!",
-        font=("Arial", 26, "bold"),
-        bg=ARAL_RED,
-        fg=WHITE,
-        relief="flat",
-        padx=16,
-        pady=6,
-    )
-    warning_label.grid(row=0, column=0, columnspan=3, pady=(0, 8))
-    warning_label.grid_remove()
-
-    # Steuerbereich oben rechts
-    ctrl = tk.Frame(grid, bg=WHITE)
-    ctrl.grid(row=0, column=3, columnspan=2, rowspan=6, sticky="nsew", padx=14, pady=(0, 8))
-    ctrl.grid_columnconfigure(0, weight=1)
-    ctrl.grid_rowconfigure(0, weight=0)
-    ctrl.grid_rowconfigure(1, weight=1)
-
-    global zone_buttons
-    zone_buttons = {}
-
-    einbuchen_btn = tk.Button(
-        ctrl,
-        text="Einbuchen",
-        font=("Arial", 26, "bold"),
-        bg=ARAL_BLUE,
-        fg=WHITE,
-        activebackground=ARAL_BLUE,
-        activeforeground=WHITE,
-        relief="flat",
-        borderwidth=0,
-        padx=24,
-        pady=18,
-        command=toggle_einbuchen,
-    )
-    einbuchen_btn.grid(row=0, column=0, sticky="nsew", ipadx=10, ipady=10)
-
-    result_panel = ttk.Frame(ctrl, padding=(0, 16, 0, 0), style="White.TFrame")
-    result_panel.grid(row=1, column=0, sticky="nsew")
-    ttk.Label(result_panel, text="Pakete", style="Header.TLabel").pack(anchor=tk.W)
-
-    result_container = ttk.Frame(result_panel, style="White.TFrame")
-    result_container.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
-    result_scroll = ttk.Scrollbar(result_container, orient=tk.VERTICAL)
-    result_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-    result_list = tk.Listbox(
-        result_container,
-        font=("Consolas", 18),
-        height=16,
-        exportselection=False,
-        yscrollcommand=result_scroll.set,
-    )
-    apply_listbox_theme(result_list)
-    result_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    result_scroll.config(command=result_list.yview)
-    result_list.bind("<<ListboxSelect>>", on_result_select)
-
-    # Helper zum Erzeugen der Buttons
-    def make_zone_btn(name: str, r: int, c: int, colspan: int = 1, font_size: int = 48) -> tk.Button:
-        btn = tk.Button(
-            grid,
-            text=name,
-            command=lambda z=name: set_zone(z),
-            font=("Arial", font_size, "bold"),
-            bg=WHITE,
-            fg=ARAL_BLUE,
-            activebackground=WHITE,
-            activeforeground=ARAL_BLUE,
-            relief="solid",
-            bd=4,
-            highlightthickness=0,
+    # --- Fuzzy / Matching ---
+    def match_directory(self, sendungsnr: str) -> Tuple[Optional[str], Sequence[str], Optional[int]]:
+        if not sendungsnr:
+            return None, [], None
+        key = sendungsnr.strip()
+        entry = directory_cache.get(key)
+        if entry:
+            return entry.name or None, [key], 100
+        if not directory_choices:
+            return None, [], None
+        matches = process.extract(
+            key,
+            directory_choices,
+            scorer=fuzz.WRatio,
+            processor=None,
+            score_cutoff=85,
+            limit=6,
         )
-        btn.grid(row=r, column=c, columnspan=colspan, padx=12, pady=12, sticky="nsew")
-        zone_buttons[name] = btn
-        return btn
+        if not matches:
+            return None, [], None
+        best_score = matches[0][1]
+        best_key = matches[0][0]
+        matched_keys = [choice for choice, _score, *_ in matches]
 
-    make_zone_btn("A", 1, 0, colspan=3)
-    make_zone_btn("B", 2, 0, colspan=3)
-    make_zone_btn("C", 3, 0, colspan=3)
-    make_zone_btn("D", 4, 0, colspan=3)
+        if best_score >= 90:
+            name = directory_cache.get(best_key)
+            return (name.name if name else None), matched_keys, best_score
 
-    make_zone_btn("E-1", 5, 0, font_size=42)
-    make_zone_btn("E-2", 5, 1, font_size=42)
-    make_zone_btn("E-3", 5, 2, font_size=42)
-    make_zone_btn("E-4", 5, 3, font_size=42)
-    make_zone_btn("F", 5, 4, font_size=42)
+        plausible_names = {
+            directory_cache[choice].name
+            for choice, score, *_ in matches
+            if 85 <= score <= 95 and choice in directory_cache and directory_cache[choice].name
+        }
+        combined = " / ".join(sorted(plausible_names)) if plausible_names else None
+        return combined or None, matched_keys, best_score
 
-    reset_zone_colors()
+    # --- Packages Ops ---
+    def insert_package(self, sendungsnr: str, zone: str, name: Optional[str]) -> None:
+        ts = datetime.now().isoformat(timespec="seconds")
+        with DB_LOCK:
+            conn.execute(
+                """
+                INSERT INTO packages (sendungsnr, zone, received_at, name)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(sendungsnr) DO UPDATE SET
+                    zone=excluded.zone,
+                    received_at=excluded.received_at,
+                    name=excluded.name
+                """,
+                (sendungsnr, zone, ts, name),
+            )
+            conn.commit()
 
-    # Protokoll-Liste
-    log_panel = ttk.Frame(app, padding=(16, 8), style="White.TFrame")
-    log_panel.pack(fill=tk.BOTH, expand=True)
-    ttk.Label(log_panel, text="Protokoll", style="Header.TLabel").pack(anchor=tk.W)
+    def fetch_all_packages(self) -> List[sqlite3.Row]:
+        with DB_LOCK:
+            rows = conn.execute(
+                """
+                SELECT sendungsnr,
+                       COALESCE(name, '') AS name,
+                       COALESCE(zone, '') AS zone,
+                       COALESCE(received_at, '') AS received_at
+                FROM packages
+                ORDER BY datetime(received_at) DESC
+                LIMIT 500
+                """
+            ).fetchall()
+        return list(rows)
 
-    log_container = ttk.Frame(log_panel, style="White.TFrame")
-    log_container.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
-    log_scroll = ttk.Scrollbar(log_container, orient=tk.VERTICAL)
-    log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-    log_list = tk.Listbox(
-        log_container,
-        font=("Consolas", 14),
-        height=8,
-        exportselection=False,
-        yscrollcommand=log_scroll.set,
-    )
-    apply_listbox_theme(log_list)
-    log_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    log_scroll.config(command=log_list.yview)
+    # --- Results / Search ---
+    def populate_result_list(self, items: Sequence[Dict[str, Any]], empty_message: str):
+        self.result_rows = []
+        self.result_items = []
+        if not items:
+            self.result_items = [{"text": empty_message, "index": -1}]
+            return
+        for item in items:
+            sendungsnr = str(item.get("sendungsnr") or "").strip()
+            if not sendungsnr:
+                continue
+            name = str(item.get("name") or "").strip()
+            zone = str(item.get("zone") or "").strip()
+            timestamp = str(item.get("received_at") or "").strip()
+            score = item.get("score")
 
-    # Aktionen
-    actions = ttk.Frame(app, padding=(16, 8), style="White.TFrame")
-    actions.pack(fill=tk.X)
+            label = f"{sendungsnr}"
+            if name:
+                label += f" — {name}"
+            label += f" → {zone or '-'}"
+            if timestamp:
+                label += f" ({timestamp})"
+            if score is not None and score != "":
+                label += f"  [Score {score}]"
 
-    ttk.Button(actions, text="Treffer löschen", bootstyle="danger", command=delete_selected).pack(
-        side=tk.LEFT, padx=(0, 12)
-    )
-    ttk.Button(
-        actions,
-        text="Alle anzeigen",
-        bootstyle="secondary",
-        command=lambda: (search_var.set(""), run_search()),
-    ).pack(side=tk.LEFT)
+            self.result_items.append({"text": label, "index": len(self.result_rows)})
+            self.result_rows.append({"sendungsnr": sendungsnr, "zone": zone})
 
-    # Initiale Daten anzeigen
-    show_result_panel(True)
-    display_packages(fetch_all_packages())
-    update_counter_label()
-    ensure_focus()
+        if not self.result_rows and len(self.result_items) == 0:
+            self.result_items = [{"text": empty_message, "index": -1}]
 
-    # periodische Syncs starten
-    app.after(2000, schedule_sync)
+    def display_packages(self, rows: Sequence[sqlite3.Row]):
+        self.populate_result_list([dict(r) for r in rows], empty_message="Keine Pakete vorhanden")
 
-    # Suchfeld bei Fokusverlust sofort zurückholen (Scanner-Komfort)
-    def refocus(_event: tk.Event) -> None:
-        ensure_focus()
+    def run_search(self):
+        term = self.root.ids.scanner_input.text.strip()
+        rows = self.fetch_all_packages()
+        if not rows:
+            self.populate_result_list([], empty_message="Keine Pakete vorhanden")
+            return
+        if not term:
+            self.display_packages(rows)
+            return
 
-    app.bind_all("<FocusOut>", refocus, add="+")
+        choices: Dict[str, sqlite3.Row] = {}
+        dataset: Dict[str, str] = {}
+        for row in rows:
+            key = row["sendungsnr"]
+            choices[key] = row
+            candidate = " ".join(part for part in (row["sendungsnr"], row["name"], row["zone"]) if part)
+            dataset[key] = candidate
 
+        matches = process.extract(
+            term,
+            dataset,
+            scorer=fuzz.WRatio,
+            processor=None,
+            score_cutoff=70,
+            limit=200,
+        )
+        if not matches:
+            self.populate_result_list([], empty_message="Kein Treffer")
+            return
+
+        sorted_rows: List[sqlite3.Row] = []
+        seen_keys: set[str] = set()
+        for key, score, _value in sorted(matches, key=lambda item: item[1], reverse=True):
+            if key in seen_keys:
+                continue
+            row = choices.get(key)
+            if not row:
+                continue
+            row = dict(row)
+            row["score"] = score
+            sorted_rows.append(row)
+            seen_keys.add(key)
+
+        self.populate_result_list(sorted_rows, empty_message="Kein Treffer")
+
+    # --- UI events ---
+    def on_text_validate(self):  # Enter gedrückt
+        value = self.root.ids.scanner_input.text.strip()
+        if not value:
+            if not self.einbuchen_mode:
+                self.run_search()
+            return
+
+        if self.einbuchen_mode:
+            if not self.active_zone:
+                self.log("Zone auswählen, bevor eingebucht wird")
+                self.show_zone_warning_label()
+                self.ensure_focus()
+                return
+            name, matches, score = self.match_directory(value)
+            self.insert_package(value, self.active_zone, name)
+            self.session_counter += 1
+            self.update_counter_label()
+            log_msg = f"{value} → {self.active_zone}"
+            if name:
+                log_msg += f" ({name})"
+            if score is not None:
+                log_msg += f" [Score {score}]"
+            elif matches:
+                log_msg += " [Mehrfachtreffer]"
+            self.log(log_msg)
+            if matches and len(matches) > 1:
+                self.log(f"Fuzzy Matches: {', '.join(matches)}")
+            self.root.ids.scanner_input.text = ""
+            self.ensure_focus()
+            return
+
+        self.run_search()
+
+    def on_search_button(self):
+        self.run_search()
+        self.ensure_focus()
+
+    def on_all_button(self):
+        self.root.ids.scanner_input.text = ""
+        self.run_search()
+        self.ensure_focus()
+
+    def on_delete_button(self):
+        idx = self.selected_index
+        if idx is None or idx < 0 or idx >= len(self.result_rows):
+            return
+        sendungsnr = self.result_rows[idx]["sendungsnr"]
+        with DB_LOCK:
+            conn.execute("DELETE FROM packages WHERE sendungsnr=?", (sendungsnr,))
+            conn.commit()
+        self.log(f"{sendungsnr} gelöscht")
+        # refresh list
+        self.run_search()
+        self.refresh_zone_highlights(None)
+
+    def on_result_select(self, idx: int):
+        self.selected_index = idx
+        if idx is None or idx < 0 or idx >= len(self.result_rows):
+            self.refresh_zone_highlights(None)
+            return
+        zone = self.result_rows[idx].get("zone") or ""
+        self.refresh_zone_highlights(zone if zone else None)
+
+    # --- Sync scheduling ---
+    def schedule_sync(self):
+        def worker():
+            perform_sync()
+            Clock.schedule_once(lambda dt: self.schedule_sync(), SYNC_INTERVAL_SECONDS)
+        threading.Thread(target=worker, daemon=True).start()
 
 if __name__ == "__main__":
-    args = parse_cli_args()
-    env_fullscreen = os.environ.get("HERMES_FULLSCREEN", "").strip().lower()
-    fullscreen_flag = args.fullscreen or env_fullscreen in {"1", "true", "yes", "on"}
-    build_gui(fullscreen=fullscreen_flag)
-    app.mainloop()
+    HermesApp().run()
 

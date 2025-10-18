@@ -1,4 +1,4 @@
 # Kernanwendung (Versionsstände passend zur App getestet)
-ttkbootstrap==1.10.1
+ttkbootstrap==1.14.7
 rapidfuzz==3.6.1
 requests==2.31.0
