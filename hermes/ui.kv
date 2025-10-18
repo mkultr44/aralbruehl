@@ -309,6 +309,7 @@
                     do_scroll_x: False
                     RecycleView:
                         id: rv
+                        data: app.result_items
                         viewclass: "SelectableRow"
                         RecycleBoxLayout:
                             default_size: None, dp(56)
@@ -327,5 +328,3 @@
                         text: "Alle anzeigen"
                         on_release: app.on_all_button()
 
-Root:
-    rv.data: app.result_items
