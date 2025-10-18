@@ -397,9 +397,6 @@ def perform_sync() -> None:
     App.get_running_app().log_async(f"CSV Sync abgeschlossen ({len(entries)} Einträge)")
 
 # --- Kivy App ---
-class LogView(ModalView):
-    pass
-
 class HermesApp(App):
     title = "Paket-Zonen-Manager"
     zone_status = StringProperty("Suche aktiv")
