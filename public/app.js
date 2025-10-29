@@ -26,13 +26,14 @@ const dayView = document.getElementById('day-view');
 const weekView = document.getElementById('week-view');
 const selectedDateLabel = document.getElementById('selected-date-label');
 const jobModal = document.getElementById('job-modal');
+const detailModal = document.getElementById('detail-modal');
 const clipboardModal = document.getElementById('clipboard-modal');
 const jobForm = document.getElementById('job-form');
 const clipboardForm = document.getElementById('clipboard-form');
 const fileInput = document.getElementById('job-files');
 const filePreview = document.getElementById('file-preview');
 const modalTitle = document.getElementById('modal-title');
-const deleteJobButton = document.getElementById('delete-job-btn');
+const detailContent = document.getElementById('detail-content');
 const clipboardList = document.getElementById('clipboard-list');
 
 const state = {
@@ -112,15 +113,12 @@ function bindUI() {
   jobForm.addEventListener('submit', handleJobSubmit);
   clipboardForm.addEventListener('submit', handleClipboardSubmit);
   fileInput.addEventListener('change', handleFileInput);
-  if (deleteJobButton) {
-    deleteJobButton.addEventListener('click', handleDeleteJob);
-  }
 
   document.querySelectorAll('[data-close-modal]').forEach((button) => {
     button.addEventListener('click', closeModals);
   });
 
-  [jobModal, clipboardModal].forEach((modal) => {
+  [jobModal, detailModal, clipboardModal].forEach((modal) => {
     modal.addEventListener('click', (event) => {
       if (event.target === modal) closeModals();
     });
@@ -194,8 +192,8 @@ function renderDayView() {
 
 function renderWeekView() {
   const startOfWeek = getMonday(currentDate);
-  const weekStack = document.createElement('div');
-  weekStack.className = 'week-stack';
+  const weekRow = document.createElement('div');
+  weekRow.className = 'week-row';
 
   for (let i = 0; i < 7; i++) {
     const day = new Date(startOfWeek);
@@ -206,9 +204,8 @@ function renderWeekView() {
 
     const header = document.createElement('header');
     const title = document.createElement('h3');
-    title.textContent = day.toLocaleDateString('de-DE', { weekday: 'long' });
-    const label = document.createElement('span');
-    label.className = 'week-day-date';
+    title.textContent = day.toLocaleDateString('de-DE', { weekday: 'short' });
+    const label = document.createElement('small');
     label.textContent = day.toLocaleDateString('de-DE', {
       day: '2-digit',
       month: '2-digit',
@@ -218,18 +215,10 @@ function renderWeekView() {
     addButton.className = 'ghost-button small';
     addButton.type = 'button';
     addButton.textContent = '+';
-    addButton.setAttribute(
-      'aria-label',
-      `Auftrag am ${title.textContent} ${label.textContent} anlegen`,
-    );
     addButton.addEventListener('click', () => openJobModal({ date: formatDateInput(day) }));
 
-    const heading = document.createElement('div');
-    heading.className = 'week-day-heading';
-    heading.appendChild(title);
-    heading.appendChild(label);
-
-    header.appendChild(heading);
+    header.appendChild(title);
+    header.appendChild(label);
     header.appendChild(addButton);
 
     const weekColumns = document.createElement('div');
@@ -254,7 +243,14 @@ function renderWeekView() {
         column.appendChild(empty);
       } else {
         jobs.forEach((job) => {
-          const jobElement = createWeekJobCard(job);
+          const jobElement = document.createElement('div');
+          jobElement.className = 'week-job';
+          jobElement.innerHTML = `
+            <strong>${job.title}</strong>
+            <span>${job.time || 'Ganztägig'}</span>
+            <span>${job.customer || 'Kunde unbekannt'}</span>
+          `;
+          jobElement.addEventListener('click', () => openDetailModal(job));
           column.appendChild(jobElement);
         });
       }
@@ -264,11 +260,11 @@ function renderWeekView() {
 
     weekDay.appendChild(header);
     weekDay.appendChild(weekColumns);
-    weekStack.appendChild(weekDay);
+    weekRow.appendChild(weekDay);
   }
 
   weekView.innerHTML = '';
-  weekView.appendChild(weekStack);
+  weekView.appendChild(weekRow);
 }
 
 function renderClipboard() {
@@ -326,169 +322,30 @@ function createJobCard(job) {
   element.dataset.jobId = job.id;
 
   element.querySelector('.job-title').textContent = job.title;
-  element.querySelector('.job-time').textContent = job.time || 'Ganztägig';
-  element.querySelector('.job-customer').textContent = job.customer || '–';
-  element.querySelector('.job-contact').textContent = job.contact || '–';
-  element.querySelector('.job-vehicle').textContent = job.vehicle || '–';
-  element.querySelector('.job-license').textContent = job.license || '–';
-
-  const notesBlock = element.querySelector('.job-notes-block');
-  const notesText = element.querySelector('.job-notes');
-  if (job.notes) {
-    notesText.textContent = job.notes;
-    notesBlock.classList.remove('hidden');
-  } else {
-    notesText.textContent = '';
-    notesBlock.classList.add('hidden');
-  }
-
-  const attachmentsBlock = element.querySelector('.job-attachments');
-  const attachmentList = attachmentsBlock.querySelector('.attachment-chips');
-  attachmentList.innerHTML = '';
-  if (job.attachments?.length) {
-    attachmentsBlock.classList.remove('hidden');
-    job.attachments.forEach((attachment) => {
-      const link = document.createElement('a');
-      link.className = 'attachment-chip';
-      link.href = attachment.url;
-      link.target = '_blank';
-      link.rel = 'noopener noreferrer';
-      link.textContent = attachment.name;
-      link.addEventListener('click', (event) => event.stopPropagation());
-      link.addEventListener('keydown', (event) => event.stopPropagation());
-      attachmentList.appendChild(link);
-    });
-  } else {
-    attachmentsBlock.classList.add('hidden');
-  }
+  element.querySelector('.job-meta').textContent = `${
+    job.time || 'Ganztägig'
+  } • ${job.customer || 'Unbekannter Kunde'}`;
+  element.querySelector('.job-notes').textContent = job.notes || '';
 
   const statusToggle = element.querySelector('.status-toggle');
   statusToggle.dataset.status = job.status;
   statusToggle.title = STATUS_LABELS[job.status];
-  statusToggle.setAttribute('aria-label', STATUS_LABELS[job.status]);
   statusToggle.style.background = statusColor(job.status);
-  statusToggle.addEventListener('click', (event) => {
-    event.stopPropagation();
-    cycleJobStatus(job);
-  });
+  statusToggle.addEventListener('click', () => cycleJobStatus(job));
   statusToggle.addEventListener('keydown', (event) => {
-    event.stopPropagation();
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
       cycleJobStatus(job);
     }
   });
 
-  element.addEventListener('click', (event) => {
-    if (event.target.closest('.status-toggle')) return;
-    openJobModal(job);
-  });
-  element.addEventListener('keydown', (event) => {
-    if (event.target.closest('.status-toggle')) return;
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      openJobModal(job);
-    }
-  });
-
-  return element;
-}
-
-function createWeekJobCard(job) {
-  const element = document.createElement('article');
-  element.className = 'week-job';
-  element.tabIndex = 0;
-
-  const header = document.createElement('div');
-  header.className = 'week-job-header';
-
-  const time = document.createElement('span');
-  time.className = 'week-job-time';
-  time.textContent = job.time || 'Ganztägig';
-
-  const status = document.createElement('span');
-  status.className = 'week-job-status';
-  status.title = STATUS_LABELS[job.status];
-  status.setAttribute('aria-label', STATUS_LABELS[job.status]);
-  status.setAttribute('role', 'img');
-  status.style.background = statusColor(job.status);
-
-  header.appendChild(time);
-  header.appendChild(status);
-
-  const title = document.createElement('h4');
-  title.className = 'week-job-title';
-  title.textContent = job.title;
-
-  element.appendChild(header);
-  element.appendChild(title);
-
-  const details = document.createElement('div');
-  details.className = 'week-job-details';
-  [
-    ['Kunde', job.customer || '–'],
-    ['Kontakt', job.contact || '–'],
-    ['Fahrzeug', job.vehicle || '–'],
-    ['Kennzeichen', job.license || '–'],
-  ].forEach(([label, value]) => {
-    const detail = document.createElement('div');
-    detail.className = 'week-job-detail';
-
-    const labelEl = document.createElement('span');
-    labelEl.className = 'job-label';
-    labelEl.textContent = label;
-
-    const valueEl = document.createElement('span');
-    valueEl.textContent = value;
-
-    detail.appendChild(labelEl);
-    detail.appendChild(valueEl);
-    details.appendChild(detail);
-  });
-  element.appendChild(details);
-
-  if (job.notes) {
-    const notes = document.createElement('p');
-    notes.className = 'week-job-notes';
-    notes.textContent = job.notes;
-    element.appendChild(notes);
-  }
-
-  if (job.attachments?.length) {
-    const attachments = document.createElement('div');
-    attachments.className = 'week-job-attachments';
-
-    const label = document.createElement('span');
-    label.className = 'job-label';
-    label.textContent = 'Anhänge';
-    attachments.appendChild(label);
-
-    const list = document.createElement('div');
-    list.className = 'attachment-chips';
-
-    job.attachments.forEach((attachment) => {
-      const link = document.createElement('a');
-      link.className = 'attachment-chip';
-      link.href = attachment.url;
-      link.target = '_blank';
-      link.rel = 'noopener noreferrer';
-      link.textContent = attachment.name;
-      link.addEventListener('click', (event) => event.stopPropagation());
-      link.addEventListener('keydown', (event) => event.stopPropagation());
-      list.appendChild(link);
-    });
-
-    attachments.appendChild(list);
-    element.appendChild(attachments);
-  }
-
-  element.addEventListener('click', () => openJobModal(job));
-  element.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      openJobModal(job);
-    }
-  });
+  element.querySelector('[data-action="details"]').addEventListener('click', () =>
+    openDetailModal(job),
+  );
+  element.querySelector('[data-action="clipboard"]').addEventListener('click', () =>
+    addJobToClipboard(job),
+  );
+  element.addEventListener('dblclick', () => openJobModal(job));
 
   return element;
 }
@@ -575,20 +432,6 @@ async function handleJobSubmit(event) {
   } catch (error) {
     console.error(error);
     alert(error.message || 'Auftrag konnte nicht gespeichert werden.');
-  }
-}
-
-async function handleDeleteJob() {
-  if (!editingJobId) return;
-  if (!confirm('Auftrag wirklich löschen?')) return;
-
-  try {
-    await deleteJob(editingJobId);
-    closeModals();
-    render();
-  } catch (error) {
-    console.error(error);
-    alert(error.message || 'Auftrag konnte nicht gelöscht werden.');
   }
 }
 
@@ -686,9 +529,6 @@ function openJobModal(job = {}) {
   const data = editingJobSnapshot || job;
 
   modalTitle.textContent = editingJobId ? 'Auftrag bearbeiten' : 'Auftrag anlegen';
-  if (deleteJobButton) {
-    deleteJobButton.classList.toggle('hidden', !editingJobId);
-  }
 
   jobForm.elements.date.value = data.date || formatDateInput(currentDate);
   jobForm.elements.time.value = data.time || '';
@@ -708,6 +548,107 @@ function openJobModal(job = {}) {
   jobForm.elements.title.focus();
 }
 
+function openDetailModal(job) {
+  const data = findJob(job.id);
+  if (!data) return;
+
+  detailContent.innerHTML = '';
+
+  const detailGrid = document.createElement('div');
+  detailGrid.className = 'detail-grid';
+
+  const items = [
+    { label: 'Datum', value: new Date(data.date).toLocaleDateString('de-DE') },
+    { label: 'Uhrzeit', value: data.time || 'Ganztägig' },
+    { label: 'Bereich', value: CATEGORY_CONFIG[data.category]?.title || '' },
+    { label: 'Kunde', value: data.customer || '–' },
+    { label: 'Kontakt', value: data.contact || '–' },
+    { label: 'Fahrzeug', value: data.vehicle || '–' },
+    { label: 'Kennzeichen', value: data.license || '–' },
+    { label: 'Notizen', value: data.notes || '–' },
+  ];
+
+  detailGrid.innerHTML = items
+    .map(
+      (item) => `
+        <div class="detail-item">
+          <span class="label">${item.label}</span>
+          <span>${item.value}</span>
+        </div>
+      `,
+    )
+    .join('');
+
+  const status = document.createElement('div');
+  status.className = 'status-indicator';
+  status.innerHTML = `
+    <span class="label">Status</span>
+    <span class="status-pill" style="background:${statusColor(data.status)}"></span>
+    <span>${STATUS_LABELS[data.status]}</span>
+  `;
+
+  const attachments = document.createElement('div');
+  attachments.className = 'attachment-list';
+  const attachmentTitle = document.createElement('span');
+  attachmentTitle.className = 'label';
+  attachmentTitle.textContent = 'Dokumente & Bilder';
+  attachments.appendChild(attachmentTitle);
+
+  if (data.attachments?.length) {
+    data.attachments.forEach((attachment) => {
+      const link = document.createElement('a');
+      link.href = attachment.url;
+      link.textContent = attachment.name;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      attachments.appendChild(link);
+    });
+  } else {
+    const empty = document.createElement('span');
+    empty.textContent = 'Keine Anhänge vorhanden.';
+    attachments.appendChild(empty);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'modal-actions';
+
+  const editButton = document.createElement('button');
+  editButton.type = 'button';
+  editButton.className = 'ghost-button';
+  editButton.textContent = 'Bearbeiten';
+  editButton.addEventListener('click', () => {
+    toggleModal(detailModal, false);
+    openJobModal(data);
+  });
+
+  const deleteButton = document.createElement('button');
+  deleteButton.type = 'button';
+  deleteButton.className = 'ghost-button';
+  deleteButton.textContent = 'Löschen';
+  deleteButton.addEventListener('click', async () => {
+    if (confirm('Auftrag wirklich löschen?')) {
+      try {
+        await deleteJob(data.id);
+        closeModals();
+        render();
+      } catch (error) {
+        console.error(error);
+        alert(error.message || 'Auftrag konnte nicht gelöscht werden.');
+      }
+    }
+  });
+
+  actions.appendChild(editButton);
+  actions.appendChild(deleteButton);
+
+  detailContent.appendChild(detailGrid);
+  detailContent.appendChild(status);
+  detailContent.appendChild(attachments);
+  detailContent.appendChild(actions);
+
+  toggleModal(detailModal, true);
+}
+
 function openClipboardModal() {
   clipboardForm.reset();
   toggleModal(clipboardModal, true);
@@ -725,10 +666,8 @@ function closeModals() {
   fileInput.value = '';
   filePreview.innerHTML = '';
   clipboardForm.reset();
-  if (deleteJobButton) {
-    deleteJobButton.classList.add('hidden');
-  }
   toggleModal(jobModal, false);
+  toggleModal(detailModal, false);
   toggleModal(clipboardModal, false);
 }
 
@@ -737,6 +676,20 @@ function toggleModal(modal, open) {
     modal.classList.remove('hidden');
   } else {
     modal.classList.add('hidden');
+  }
+}
+
+async function addJobToClipboard(job) {
+  try {
+    const item = await api.createClipboard({
+      title: job.title,
+      notes: `${job.customer || 'Kunde'} • ${new Date(job.date).toLocaleDateString('de-DE')}`,
+    });
+    state.clipboard.push(item);
+    renderClipboard();
+  } catch (error) {
+    console.error(error);
+    alert(error.message || 'Auftrag konnte nicht zum Clipboard hinzugefügt werden.');
   }
 }
 

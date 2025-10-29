@@ -106,18 +106,24 @@
               <input type="checkbox" id="job-clipboard" name="clipboard" />
               <span>Auch im Clipboard speichern</span>
             </label>
-            <button
-              id="delete-job-btn"
-              class="ghost-button danger hidden"
-              type="button"
-            >
-              Auftrag löschen
-            </button>
             <div class="spacer"></div>
             <button class="ghost-button" data-close-modal type="button">Abbrechen</button>
             <button class="primary-button" type="submit">Speichern</button>
           </footer>
         </form>
+      </div>
+    </div>
+
+    <div id="detail-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-content">
+        <header>
+          <h2>Auftragsdetails</h2>
+          <button class="icon-button" data-close-modal type="button">✕</button>
+        </header>
+        <div id="detail-content" class="detail-content"></div>
+        <footer class="modal-actions">
+          <button class="ghost-button" data-close-modal type="button">Schließen</button>
+        </footer>
       </div>
     </div>
 
@@ -146,40 +152,17 @@
     </div>
 
     <template id="job-card-template">
-      <article class="job-card" tabindex="0">
+      <article class="job-card">
         <div class="job-card-header">
-          <div class="job-headline">
-            <span class="job-time"></span>
-            <h3 class="job-title"></h3>
-          </div>
+          <h3 class="job-title"></h3>
           <div class="status-toggle" role="button" tabindex="0" aria-label="Status wechseln"></div>
         </div>
-        <div class="job-detail-grid">
-          <div class="job-detail">
-            <span class="job-label">Kunde</span>
-            <span class="job-customer"></span>
-          </div>
-          <div class="job-detail">
-            <span class="job-label">Kontakt</span>
-            <span class="job-contact"></span>
-          </div>
-          <div class="job-detail">
-            <span class="job-label">Fahrzeug</span>
-            <span class="job-vehicle"></span>
-          </div>
-          <div class="job-detail">
-            <span class="job-label">Kennzeichen</span>
-            <span class="job-license"></span>
-          </div>
-        </div>
-        <div class="job-notes-block hidden">
-          <span class="job-label">Notizen</span>
-          <p class="job-notes"></p>
-        </div>
-        <div class="job-attachments hidden">
-          <span class="job-label">Anhänge</span>
-          <div class="attachment-chips"></div>
-        </div>
+        <p class="job-meta"></p>
+        <p class="job-notes"></p>
+        <footer>
+          <button class="ghost-button small" data-action="details" type="button">Details</button>
+          <button class="ghost-button small" data-action="clipboard" type="button">Zum Clipboard</button>
+        </footer>
       </article>
     </template>
 
