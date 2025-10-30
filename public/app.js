@@ -899,7 +899,10 @@ function findJob(jobId) {
 function formatDateKey(date) {
   const clone = new Date(date);
   clone.setHours(0, 0, 0, 0);
-  return clone.toISOString().split('T')[0];
+  const year = clone.getFullYear();
+  const month = String(clone.getMonth() + 1).padStart(2, '0');
+  const day = String(clone.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 function formatDateInput(date) {
