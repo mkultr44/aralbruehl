@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Werkstattplaner</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside class="clipboard">
+        <header>
+          <h1>Clipboard</h1>
+          <button id="add-clipboard-item" class="ghost-button" type="button">
+            + Notiz
+          </button>
+        </header>
+        <div id="clipboard-list" class="clipboard-list"></div>
+      </aside>
+      <main>
+        <header class="main-header">
+          <div class="date-navigation">
+            <button id="prev-day" type="button" aria-label="Vorheriger Tag">‹</button>
+            <div class="date-center">
+              <div class="date-display">
+                <span id="selected-date-label"></span>
+                <button
+                  id="calendar-toggle"
+                  class="icon-button calendar-toggle"
+                  type="button"
+                  aria-label="Datum auswählen"
+                  aria-haspopup="dialog"
+                  aria-expanded="false"
+                >
+                  📅
+                </button>
+                <div
+                  id="calendar-dropdown"
+                  class="calendar-dropdown hidden"
+                  role="dialog"
+                  aria-modal="false"
+                >
+                  <div class="calendar-header">
+                    <button
+                      id="calendar-prev"
+                      class="icon-button"
+                      type="button"
+                      aria-label="Vorheriger Monat"
+                    >
+                      ‹
+                    </button>
+                    <span id="calendar-month-label"></span>
+                    <button
+                      id="calendar-next"
+                      class="icon-button"
+                      type="button"
+                      aria-label="Nächster Monat"
+                    >
+                      ›
+                    </button>
+                  </div>
+                  <table class="mini-calendar">
+                    <thead>
+                      <tr>
+                        <th scope="col">KW</th>
+                        <th scope="col">Mo</th>
+                        <th scope="col">Di</th>
+                        <th scope="col">Mi</th>
+                        <th scope="col">Do</th>
+                        <th scope="col">Fr</th>
+                        <th scope="col">Sa</th>
+                        <th scope="col">So</th>
+                      </tr>
+                    </thead>
+                    <tbody id="calendar-grid"></tbody>
+                  </table>
+                </div>
+              </div>
+              <button id="today-btn" class="ghost-button" type="button">Heute</button>
+            </div>
+            <button id="next-day" type="button" aria-label="Nächster Tag">›</button>
+          </div>
+          <button id="new-job-btn" class="primary-button" type="button">
+            + Auftrag anlegen
+          </button>
+        </header>
+        <section id="day-view" class="planner-view"></section>
+      </main>
+    </div>
+
+    <div id="job-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-content">
+        <header>
+          <h2 id="modal-title">Auftrag anlegen</h2>
+          <button class="icon-button" data-close-modal type="button">✕</button>
+        </header>
+        <form id="job-form">
+          <section class="form-grid">
+            <div class="form-field">
+              <label for="job-date">Datum</label>
+              <input type="date" id="job-date" name="date" required />
+            </div>
+            <div class="form-field">
+              <label for="job-time">Uhrzeit</label>
+              <input type="time" id="job-time" name="time" />
+            </div>
+            <div class="form-field">
+              <label for="job-aw">AW (Arbeitseinheiten)</label>
+              <input
+                type="number"
+                id="job-aw"
+                name="aw"
+                min="0"
+                step="0.1"
+                placeholder="z. B. 1.5"
+              />
+            </div>
+            <div class="form-field">
+              <label for="job-category">Arbeitsbereich</label>
+              <select id="job-category" name="category" required>
+                <option value="routine">Routinearbeiten</option>
+                <option value="inspection">TÜV / AU</option>
+                <option value="major">Werkstattaufträge</option>
+              </select>
+            </div>
+            <div class="form-field">
+              <label for="job-title">Kurzbeschreibung</label>
+              <input type="text" id="job-title" name="title" required placeholder="z. B. Ölwechsel &amp; Filter" />
+            </div>
+            <div class="form-field">
+              <label for="job-customer">Kunde</label>
+              <input type="text" id="job-customer" name="customer" required placeholder="Vor- und Nachname" />
+            </div>
+            <div class="form-field">
+              <label for="job-contact">Kontakt</label>
+              <input type="text" id="job-contact" name="contact" placeholder="Telefon oder E-Mail" />
+            </div>
+            <div class="form-field">
+              <label for="job-vehicle">Fahrzeug</label>
+              <input type="text" id="job-vehicle" name="vehicle" placeholder="Hersteller / Modell" />
+            </div>
+            <div class="form-field">
+              <label for="job-license">Kennzeichen</label>
+              <input type="text" id="job-license" name="license" placeholder="z. B. AB-XY 123" />
+            </div>
+            <div class="form-field checkbox-field">
+              <label class="checkbox">
+                <input type="checkbox" id="job-loaner" name="loaner" />
+                <span>Leihwagen benötigt</span>
+              </label>
+            </div>
+            <div class="form-field span-2">
+              <label for="job-notes">Notizen</label>
+              <textarea id="job-notes" name="notes" rows="3" placeholder="Zusätzliche Details"></textarea>
+            </div>
+            <div class="form-field span-2">
+              <label for="job-files">Dokumente &amp; Bilder</label>
+              <input type="file" id="job-files" name="files" multiple />
+              <p class="help-text">Unterstützt Bilder und PDFs. Dateien werden auf dem Server gespeichert und sind später abrufbar.</p>
+              <div id="file-preview" class="file-preview"></div>
+            </div>
+          </section>
+          <footer class="modal-actions">
+            <label class="checkbox">
+              <input type="checkbox" id="job-clipboard" name="clipboard" />
+              <span>Auch im Clipboard speichern</span>
+            </label>
+            <button
+              id="delete-job-btn"
+              class="ghost-button danger hidden"
+              type="button"
+            >
+              Auftrag löschen
+            </button>
+            <div class="spacer"></div>
+            <button class="ghost-button" data-close-modal type="button">Abbrechen</button>
+            <button class="primary-button" type="submit">Speichern</button>
+          </footer>
+        </form>
+      </div>
+    </div>
+
+    <div id="clipboard-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-content">
+        <header>
+          <h2>Clipboard-Notiz</h2>
+          <button class="icon-button" data-close-modal type="button">✕</button>
+        </header>
+        <form id="clipboard-form">
+          <div class="form-field">
+            <label for="clipboard-title">Titel</label>
+            <input type="text" id="clipboard-title" name="title" required />
+          </div>
+          <div class="form-field">
+            <label for="clipboard-notes">Notizen</label>
+            <textarea id="clipboard-notes" name="notes" rows="4" required></textarea>
+          </div>
+          <footer class="modal-actions">
+            <div class="spacer"></div>
+            <button class="ghost-button" data-close-modal type="button">Abbrechen</button>
+            <button class="primary-button" type="submit">Speichern</button>
+          </footer>
+        </form>
+      </div>
+    </div>
+
+    <template id="job-card-template">
+      <article class="job-card" tabindex="0">
+        <div class="job-card-header">
+          <div class="job-headline">
+            <span class="job-time"></span>
+            <h3 class="job-title"></h3>
+          </div>
+          <div class="status-toggle" role="button" tabindex="0" aria-label="Status wechseln"></div>
+        </div>
+        <div class="job-detail-grid">
+          <div class="job-detail">
+            <span class="job-label">Kunde</span>
+            <span class="job-customer"></span>
+          </div>
+          <div class="job-detail">
+            <span class="job-label">Kontakt</span>
+            <span class="job-contact"></span>
+          </div>
+          <div class="job-detail">
+            <span class="job-label">Fahrzeug</span>
+            <span class="job-vehicle"></span>
+          </div>
+          <div class="job-detail">
+            <span class="job-label">Kennzeichen</span>
+            <span class="job-license"></span>
+          </div>
+          <div class="job-detail">
+            <span class="job-label">AW</span>
+            <span class="job-aw"></span>
+          </div>
+          <div class="job-detail">
+            <span class="job-label">Leihwagen</span>
+            <span class="job-loaner"></span>
+          </div>
+        </div>
+        <div class="job-notes-block hidden">
+          <span class="job-label">Notizen</span>
+          <p class="job-notes"></p>
+        </div>
+        <div class="job-attachments hidden">
+          <span class="job-label">Anhänge</span>
+          <div class="attachment-chips"></div>
+        </div>
+      </article>
+    </template>
+
+    <script src="app.js" type="module"></script>
+  </body>
+</html>
