@@ -27,6 +27,7 @@ db.exec(`
     notes TEXT,
     aw TEXT,
     loaner INTEGER NOT NULL DEFAULT 0,
+    tire_storage INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'arrived', 'done')),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -57,6 +58,10 @@ if (!jobColumns.some((column) => column.name === 'aw')) {
 
 if (!jobColumns.some((column) => column.name === 'loaner')) {
   db.exec('ALTER TABLE jobs ADD COLUMN loaner INTEGER NOT NULL DEFAULT 0');
+}
+
+if (!jobColumns.some((column) => column.name === 'tire_storage')) {
+  db.exec('ALTER TABLE jobs ADD COLUMN tire_storage INTEGER NOT NULL DEFAULT 0');
 }
 
 module.exports = db;

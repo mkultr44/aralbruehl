@@ -248,6 +248,24 @@ main {
   opacity: 0.6;
 }
 
+.calendar-day.holiday button {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.calendar-day.disabled button {
+  cursor: not-allowed;
+  opacity: 0.3;
+  pointer-events: none;
+  background: transparent;
+}
+
+.calendar-day.disabled button:hover,
+.calendar-day.disabled button:focus-visible {
+  background: transparent;
+  transform: none;
+}
+
 .calendar-day.today:not(.selected) button {
   border: 1px solid rgba(37, 99, 235, 0.5);
 }
@@ -259,6 +277,22 @@ main {
 }
 button {
   font-family: inherit;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+  box-shadow: none;
+}
+
+.primary-button:disabled {
+  background: linear-gradient(135deg, rgba(37, 99, 235, 0.35), rgba(37, 99, 235, 0.2));
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.ghost-button:disabled {
+  border-color: rgba(148, 163, 184, 0.4);
+  color: var(--text-muted);
 }
 
 .primary-button {
@@ -322,6 +356,29 @@ button {
   overflow-y: auto;
 }
 
+.non-working-notice {
+  background: linear-gradient(135deg, rgba(37, 99, 235, 0.12), rgba(37, 99, 235, 0.05));
+  border: 1px solid rgba(37, 99, 235, 0.2);
+  border-radius: 1.4rem;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 18px 40px rgba(37, 99, 235, 0.12);
+  backdrop-filter: blur(4px);
+}
+
+.non-working-notice h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--primary-dark);
+}
+
+.non-working-notice p {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--text-muted);
+}
+
 .hidden {
   display: none !important;
 }
@@ -345,20 +402,12 @@ button {
 }
 
 .day-column.disabled {
-  opacity: 0.5;
-  position: relative;
+  opacity: 0.65;
+  filter: grayscale(0.1);
 }
 
-.day-column.disabled::after {
-  content: 'Nicht verfügbar';
-  position: absolute;
-  inset: 50% auto auto 50%;
-  transform: translate(-50%, -50%);
-  background: rgba(239, 68, 68, 0.9);
-  color: #fff;
-  padding: 0.4rem 0.8rem;
-  border-radius: 0.75rem;
-  font-size: 0.85rem;
+.day-column.disabled .add-job {
+  pointer-events: none;
 }
 
 .day-column header {
@@ -416,6 +465,16 @@ button {
 
 .job-card.has-loaner .job-loaner {
   color: var(--primary);
+  font-weight: 600;
+}
+
+.job-card.has-tire-storage {
+  border-color: rgba(16, 185, 129, 0.35);
+  box-shadow: 0 16px 38px rgba(16, 185, 129, 0.18);
+}
+
+.job-card.has-tire-storage .job-tire-storage {
+  color: var(--success);
   font-weight: 600;
 }
 

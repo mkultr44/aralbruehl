@@ -23,6 +23,7 @@ const CATEGORY_CONFIG = {
 const CATEGORY_ORDER = Object.keys(CATEGORY_CONFIG);
 
 const dayView = document.getElementById('day-view');
+const newJobButton = document.getElementById('new-job-btn');
 const selectedDateLabel = document.getElementById('selected-date-label');
 const calendarToggle = document.getElementById('calendar-toggle');
 const calendarDropdown = document.getElementById('calendar-dropdown');
@@ -46,7 +47,9 @@ const state = {
   clipboard: [],
 };
 
-let currentDate = new Date();
+const holidayCache = new Map();
+
+let currentDate = ensureWorkingDate(new Date(), 1);
 let calendarMonth = startOfMonth(currentDate);
 let calendarOpen = false;
 let editingJobId = null;
@@ -104,13 +107,15 @@ function bindUI() {
   document.getElementById('prev-day').addEventListener('click', () => changeDay(-1));
   document.getElementById('next-day').addEventListener('click', () => changeDay(1));
   document.getElementById('today-btn').addEventListener('click', () => {
-    currentDate = new Date();
+    currentDate = ensureWorkingDate(new Date(), 1);
     calendarMonth = startOfMonth(currentDate);
     render();
   });
-  document
-    .getElementById('new-job-btn')
-    .addEventListener('click', () => openJobModal({ date: formatDateInput(currentDate) }));
+  if (newJobButton) {
+    newJobButton.addEventListener('click', () =>
+      openJobModal({ date: formatDateInput(ensureWorkingDate(currentDate, 1)) }),
+    );
+  }
   document
     .getElementById('add-clipboard-item')
     .addEventListener('click', () => openClipboardModal());
@@ -135,6 +140,10 @@ function bindUI() {
   document.addEventListener('keydown', handleCalendarKeydown);
 
   jobForm.addEventListener('submit', handleJobSubmit);
+  const jobDateInput = jobForm.elements.date;
+  if (jobDateInput) {
+    jobDateInput.addEventListener('change', handleJobDateChange);
+  }
   clipboardForm.addEventListener('submit', handleClipboardSubmit);
   fileInput.addEventListener('change', handleFileInput);
   if (deleteJobButton) {
@@ -166,6 +175,14 @@ function renderHeader() {
     day: 'numeric',
   });
 
+  if (newJobButton) {
+    const workingDay = isWorkingDay(currentDate);
+    newJobButton.disabled = !workingDay;
+    newJobButton.title = workingDay
+      ? ''
+      : 'An diesem Tag können keine Werkstatt-Termine geplant werden.';
+  }
+
   if (calendarToggle) {
     calendarToggle.setAttribute('aria-expanded', calendarOpen ? 'true' : 'false');
   }
@@ -174,6 +191,7 @@ function renderHeader() {
 }
 
 function renderDayView() {
+  const workingDay = isWorkingDay(currentDate);
   const dayColumns = document.createElement('div');
   dayColumns.className = 'day-columns';
 
@@ -181,7 +199,7 @@ function renderDayView() {
     const config = CATEGORY_CONFIG[category];
     const column = document.createElement('section');
     column.className = 'day-column';
-    const available = isCategoryAvailable(category, currentDate);
+    const available = workingDay && isCategoryAvailable(category, currentDate);
     if (!available) column.classList.add('disabled');
 
     const header = document.createElement('header');
@@ -193,6 +211,11 @@ function renderDayView() {
     addButton.type = 'button';
     addButton.textContent = 'Auftrag hinzufügen';
     addButton.disabled = !available;
+    addButton.title = available
+      ? ''
+      : workingDay
+        ? 'Dieser Bereich ist am ausgewählten Tag nicht verfügbar.'
+        : 'An diesem Tag können keine Werkstatt-Termine geplant werden.';
     addButton.addEventListener('click', () =>
       openJobModal({ date: formatDateInput(currentDate), category }),
     );
@@ -219,6 +242,18 @@ function renderDayView() {
   });
 
   dayView.innerHTML = '';
+  if (!workingDay) {
+    const notice = document.createElement('div');
+    notice.className = 'non-working-notice';
+    const { title, message } = describeNonWorkingDay(currentDate);
+    const heading = document.createElement('h2');
+    heading.textContent = title;
+    const paragraph = document.createElement('p');
+    paragraph.textContent = message;
+    notice.appendChild(heading);
+    notice.appendChild(paragraph);
+    dayView.appendChild(notice);
+  }
   dayView.appendChild(dayColumns);
 }
 
@@ -265,6 +300,15 @@ function renderCalendar() {
       if (cellDate.getMonth() !== calendarMonth.getMonth()) {
         cell.classList.add('muted');
       }
+      const holidayName = getHolidayName(cellDate);
+      const holiday = Boolean(holidayName);
+      const disabled = isNonWorkingDay(cellDate);
+      if (holiday) {
+        cell.classList.add('holiday');
+      }
+      if (disabled) {
+        cell.classList.add('disabled');
+      }
       if (isSameDate(cellDate, today)) {
         cell.classList.add('today');
       }
@@ -275,12 +319,19 @@ function renderCalendar() {
       const button = document.createElement('button');
       button.type = 'button';
       button.textContent = String(cellDate.getDate());
-      button.addEventListener('click', () => {
-        currentDate = new Date(cellDate.getFullYear(), cellDate.getMonth(), cellDate.getDate());
-        calendarMonth = startOfMonth(currentDate);
-        closeCalendar();
-        render();
-      });
+      button.disabled = disabled;
+      if (disabled) {
+        button.title = holiday
+          ? `${holidayName} – keine Werkstatt-Termine möglich.`
+          : 'Wochenende – keine Werkstatt-Termine möglich.';
+      } else {
+        button.addEventListener('click', () => {
+          currentDate = new Date(cellDate.getFullYear(), cellDate.getMonth(), cellDate.getDate());
+          calendarMonth = startOfMonth(currentDate);
+          closeCalendar();
+          render();
+        });
+      }
 
       cell.appendChild(button);
       row.appendChild(cell);
@@ -399,8 +450,10 @@ function createJobCard(job) {
   element.querySelector('.job-license').textContent = job.license || '–';
   element.querySelector('.job-aw').textContent = job.aw || '–';
   element.querySelector('.job-loaner').textContent = job.loaner ? 'Ja' : 'Nein';
+  element.querySelector('.job-tire-storage').textContent = job.tireStorage ? 'Ja' : 'Nein';
 
   element.classList.toggle('has-loaner', Boolean(job.loaner));
+  element.classList.toggle('has-tire-storage', Boolean(job.tireStorage));
 
   const notesBlock = element.querySelector('.job-notes-block');
   const notesText = element.querySelector('.job-notes');
@@ -493,6 +546,7 @@ async function handleJobSubmit(event) {
     notes: formData.get('notes')?.trim() || '',
     aw: formData.get('aw')?.trim() || '',
     loaner: formData.get('loaner') != null,
+    tireStorage: formData.get('tireStorage') != null,
   };
 
   if (!payload.title) {
@@ -500,7 +554,18 @@ async function handleJobSubmit(event) {
     return;
   }
 
-  if (!isCategoryAvailable(payload.category, new Date(payload.date))) {
+  const jobDate = parseInputDate(payload.date);
+  if (!jobDate) {
+    alert('Bitte wählen Sie ein gültiges Datum aus.');
+    return;
+  }
+
+  if (isNonWorkingDay(jobDate)) {
+    alert('An diesem Datum können keine Werkstatt-Termine geplant werden.');
+    return;
+  }
+
+  if (!isCategoryAvailable(payload.category, jobDate)) {
     alert('Dieser Bereich ist am ausgewählten Tag nicht verfügbar.');
     return;
   }
@@ -518,6 +583,7 @@ async function handleJobSubmit(event) {
   formData.set('notes', payload.notes);
   formData.set('aw', payload.aw);
   formData.set('loaner', payload.loaner ? 'true' : 'false');
+  formData.set('tireStorage', payload.tireStorage ? 'true' : 'false');
   formData.delete('clipboard');
 
   const replaceAttachments = Boolean(editingJobId && fileInput.files.length);
@@ -551,6 +617,23 @@ async function handleJobSubmit(event) {
     console.error(error);
     alert(error.message || 'Auftrag konnte nicht gespeichert werden.');
   }
+}
+
+function handleJobDateChange(event) {
+  const input = event.target;
+  const value = input.value;
+  const parsed = parseInputDate(value);
+  if (!parsed || isNonWorkingDay(parsed)) {
+    alert('An diesem Datum können keine Werkstatt-Termine geplant werden.');
+    const fallback = input.dataset.previousValid
+      ? input.dataset.previousValid
+      : formatDateInput(ensureWorkingDate(new Date(), 1));
+    input.value = fallback;
+    input.dataset.previousValid = fallback;
+    return;
+  }
+
+  input.dataset.previousValid = value;
 }
 
 async function handleDeleteJob() {
@@ -665,7 +748,14 @@ function openJobModal(job = {}) {
     deleteJobButton.classList.toggle('hidden', !editingJobId);
   }
 
-  jobForm.elements.date.value = data.date || formatDateInput(currentDate);
+  const defaultDate = data.date || formatDateInput(ensureWorkingDate(currentDate, 1));
+  jobForm.elements.date.value = defaultDate;
+  const parsedDefault = parseInputDate(defaultDate);
+  const fallbackDate =
+    parsedDefault && !isNonWorkingDay(parsedDefault)
+      ? defaultDate
+      : formatDateInput(ensureWorkingDate(parsedDefault || currentDate, 1));
+  jobForm.elements.date.dataset.previousValid = fallbackDate;
   jobForm.elements.time.value = data.time || '';
   jobForm.elements.category.value = data.category || 'routine';
   jobForm.elements.title.value = data.title || '';
@@ -675,6 +765,7 @@ function openJobModal(job = {}) {
   jobForm.elements.license.value = data.license || '';
   jobForm.elements.aw.value = data.aw || '';
   jobForm.elements.loaner.checked = Boolean(data.loaner);
+  jobForm.elements.tireStorage.checked = Boolean(data.tireStorage);
   jobForm.elements.notes.value = data.notes || '';
   jobForm.elements.clipboard.checked = false;
 
@@ -699,6 +790,9 @@ function closeModals() {
   editingJobId = null;
   editingJobSnapshot = null;
   jobForm.reset();
+  if (jobForm.elements.date) {
+    delete jobForm.elements.date.dataset.previousValid;
+  }
   fileInput.value = '';
   filePreview.innerHTML = '';
   clipboardForm.reset();
@@ -718,7 +812,17 @@ function toggleModal(modal, open) {
 }
 
 function changeDay(offset) {
-  currentDate.setDate(currentDate.getDate() + offset);
+  if (!offset) return;
+  const direction = offset > 0 ? 1 : -1;
+  const steps = Math.abs(offset);
+  for (let i = 0; i < steps; i++) {
+    currentDate.setDate(currentDate.getDate() + direction);
+    let guard = 0;
+    while (isNonWorkingDay(currentDate) && guard < 14) {
+      currentDate.setDate(currentDate.getDate() + direction);
+      guard += 1;
+    }
+  }
   calendarMonth = startOfMonth(currentDate);
   render();
 }
@@ -735,6 +839,7 @@ function statusColor(status) {
 }
 
 function isCategoryAvailable(category, date) {
+  if (!isWorkingDay(date)) return false;
   if (category !== 'inspection') return true;
   const weekday = date.getDay();
   return weekday >= 2 && weekday <= 5;
@@ -799,6 +904,141 @@ function formatDateKey(date) {
 
 function formatDateInput(date) {
   return formatDateKey(date);
+}
+
+function parseInputDate(value) {
+  if (value instanceof Date) {
+    const clone = new Date(value);
+    clone.setHours(0, 0, 0, 0);
+    return clone;
+  }
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return null;
+  const [year, month, day] = trimmed.split('-').map(Number);
+  const date = new Date(year, month - 1, day);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) {
+    return null;
+  }
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function ensureWorkingDate(date, direction = 1) {
+  const candidate = parseInputDate(date);
+  if (!candidate) return new Date();
+  if (!isNonWorkingDay(candidate)) {
+    return candidate;
+  }
+
+  const step = direction >= 0 ? 1 : -1;
+  let guard = 0;
+  do {
+    candidate.setDate(candidate.getDate() + step);
+    guard += 1;
+  } while (isNonWorkingDay(candidate) && guard < 366);
+  return candidate;
+}
+
+function isWorkingDay(date) {
+  return !isNonWorkingDay(date);
+}
+
+function isNonWorkingDay(date) {
+  const normalized = parseInputDate(date);
+  if (!normalized) return false;
+  return isWeekend(normalized) || isHoliday(normalized);
+}
+
+function isWeekend(date) {
+  const weekday = date.getDay();
+  return weekday === 0 || weekday === 6;
+}
+
+function isHoliday(date) {
+  return Boolean(getHolidayName(date));
+}
+
+function getHolidayName(date) {
+  const holidays = getNrwHolidays(date.getFullYear());
+  return holidays.get(formatDateKey(date)) || null;
+}
+
+function getNrwHolidays(year) {
+  if (holidayCache.has(year)) {
+    return holidayCache.get(year);
+  }
+
+  const holidays = new Map();
+  holidays.set(`${year}-01-01`, 'Neujahr');
+
+  const easterSunday = calculateEasterSunday(year);
+  holidays.set(formatDateKey(addDays(easterSunday, -2)), 'Karfreitag');
+  holidays.set(formatDateKey(addDays(easterSunday, 1)), 'Ostermontag');
+  holidays.set(`${year}-05-01`, 'Tag der Arbeit');
+  holidays.set(formatDateKey(addDays(easterSunday, 39)), 'Christi Himmelfahrt');
+  holidays.set(formatDateKey(addDays(easterSunday, 50)), 'Pfingstmontag');
+  holidays.set(formatDateKey(addDays(easterSunday, 60)), 'Fronleichnam');
+  holidays.set(`${year}-10-03`, 'Tag der Deutschen Einheit');
+  holidays.set(`${year}-11-01`, 'Allerheiligen');
+  holidays.set(`${year}-12-25`, 'Erster Weihnachtstag');
+  holidays.set(`${year}-12-26`, 'Zweiter Weihnachtstag');
+
+  holidayCache.set(year, holidays);
+  return holidays;
+}
+
+function calculateEasterSunday(year) {
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31);
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(year, month - 1, day);
+}
+
+function addDays(date, amount) {
+  const result = new Date(date.getTime());
+  result.setDate(result.getDate() + amount);
+  return result;
+}
+
+function describeNonWorkingDay(date) {
+  const normalized = parseInputDate(date);
+  if (!normalized) {
+    return {
+      title: 'Keine Werkstatt-Termine',
+      message: 'An diesem Tag können keine Termine geplant werden.',
+    };
+  }
+
+  if (isWeekend(normalized)) {
+    const dayName = normalized.toLocaleDateString('de-DE', { weekday: 'long' });
+    return {
+      title: `${dayName}: Werkstatt geschlossen`,
+      message: 'An Wochenenden können keine Werkstatt-Termine geplant werden.',
+    };
+  }
+
+  const holidayName = getHolidayName(normalized) || 'Feiertag in NRW';
+  const dayLabel = normalized.toLocaleDateString('de-DE', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+  });
+  return {
+    title: `${holidayName}: Werkstatt geschlossen`,
+    message: `${dayLabel} ist ein gesetzlicher Feiertag in Nordrhein-Westfalen. Termine sind nicht verfügbar.`,
+  };
 }
 
 function startOfDay(date) {

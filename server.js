@@ -29,6 +29,8 @@ app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static(uploadDir));
 app.use(express.static(path.join(__dirname, 'public')));
 
+const HOLIDAY_CACHE = new Map();
+
 const JOB_COLUMNS = `
   id,
   date,
@@ -42,6 +44,7 @@ const JOB_COLUMNS = `
   notes,
   aw,
   loaner,
+  tire_storage,
   status,
   created_at,
   updated_at
@@ -50,8 +53,8 @@ const JOB_COLUMNS = `
 const selectJobById = db.prepare(`SELECT ${JOB_COLUMNS} FROM jobs WHERE id = ?`);
 const selectAllJobs = db.prepare(`SELECT ${JOB_COLUMNS} FROM jobs ORDER BY date, time`);
 const insertJobStmt = db.prepare(
-  `INSERT INTO jobs (date, time, category, title, customer, contact, vehicle, license, notes, aw, loaner, status)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  `INSERT INTO jobs (date, time, category, title, customer, contact, vehicle, license, notes, aw, loaner, tire_storage, status)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 );
 const updateJobStmt = db.prepare(
   `UPDATE jobs
@@ -66,6 +69,7 @@ const updateJobStmt = db.prepare(
          notes = ?,
          aw = ?,
          loaner = ?,
+         tire_storage = ?,
          status = ?,
          updated_at = CURRENT_TIMESTAMP
    WHERE id = ?`
@@ -252,6 +256,7 @@ const insertJobTransaction = db.transaction((payload, files) => {
     payload.notes ?? null,
     payload.aw ?? null,
     payload.loaner ?? 0,
+    payload.tireStorage ?? 0,
     payload.status,
   );
   const jobId = Number(result.lastInsertRowid);
@@ -280,6 +285,7 @@ const updateJobTransaction = db.transaction((jobId, payload, files, replaceAttac
     payload.notes ?? null,
     payload.aw ?? null,
     payload.loaner ?? 0,
+    payload.tireStorage ?? 0,
     payload.status,
     jobId,
   );
@@ -314,6 +320,7 @@ function attachJobResources(row) {
     notes: row.notes || '',
     aw: row.aw || '',
     loaner: Boolean(row.loaner),
+    tireStorage: Boolean(row.tire_storage),
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -346,10 +353,16 @@ function parseJobPayload(body, options = {}) {
     throw createHttpError(400, 'Bitte ein gültiges Datum angeben.');
   }
 
+  if (!isWorkingDate(date)) {
+    throw createHttpError(400, 'An diesem Datum können keine Werkstatt-Termine geplant werden.');
+  }
+
   const category = validateCategory(body.category);
   if (category === 'inspection' && !isInspectionDate(date)) {
     throw createHttpError(400, 'TÜV / AU ist nur Dienstag bis Freitag verfügbar.');
   }
+
+  const tireStorage = normalizeBoolean(body.tireStorage ?? body.tire_storage) ? 1 : 0;
 
   return {
     date,
@@ -363,6 +376,7 @@ function parseJobPayload(body, options = {}) {
     notes: optionalText(body.notes),
     aw: optionalText(body.aw),
     loaner: normalizeBoolean(body.loaner) ? 1 : 0,
+    tireStorage,
     status: validateStatus(body.status ?? options.defaultStatus ?? 'pending'),
   };
 }
@@ -444,10 +458,93 @@ function parseId(value) {
 }
 
 function isInspectionDate(dateString) {
-  const [year, month, day] = dateString.split('-').map(Number);
-  const date = new Date(year, month - 1, day);
+  const date = parseISODate(dateString);
+  if (!date) return false;
+  if (!isWorkingDate(dateString)) return false;
   const weekday = date.getDay();
   return weekday >= 2 && weekday <= 5;
+}
+
+function isWorkingDate(dateString) {
+  const date = parseISODate(dateString);
+  if (!date) return false;
+  return !isWeekend(date) && !isNrwHoliday(date);
+}
+
+function parseISODate(dateString) {
+  if (typeof dateString !== 'string') return null;
+  const parts = dateString.split('-').map(Number);
+  if (parts.length !== 3 || parts.some((part) => Number.isNaN(part))) {
+    return null;
+  }
+  const [year, month, day] = parts;
+  const date = new Date(year, month - 1, day);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) {
+    return null;
+  }
+  return date;
+}
+
+function isWeekend(date) {
+  const weekday = date.getDay();
+  return weekday === 0 || weekday === 6;
+}
+
+function isNrwHoliday(date) {
+  const holidays = getNrwHolidays(date.getFullYear());
+  return holidays.has(formatISODate(date));
+}
+
+function getNrwHolidays(year) {
+  if (HOLIDAY_CACHE.has(year)) {
+    return HOLIDAY_CACHE.get(year);
+  }
+
+  const holidays = new Set();
+  holidays.add(`${year}-01-01`); // Neujahr
+
+  const easterSunday = calculateEasterSunday(year);
+  holidays.add(formatISODate(addDays(easterSunday, -2))); // Karfreitag
+  holidays.add(formatISODate(addDays(easterSunday, 1))); // Ostermontag
+  holidays.add(`${year}-05-01`); // Tag der Arbeit
+  holidays.add(formatISODate(addDays(easterSunday, 39))); // Christi Himmelfahrt
+  holidays.add(formatISODate(addDays(easterSunday, 50))); // Pfingstmontag
+  holidays.add(formatISODate(addDays(easterSunday, 60))); // Fronleichnam
+  holidays.add(`${year}-10-03`); // Tag der Deutschen Einheit
+  holidays.add(`${year}-11-01`); // Allerheiligen
+  holidays.add(`${year}-12-25`); // 1. Weihnachtstag
+  holidays.add(`${year}-12-26`); // 2. Weihnachtstag
+
+  HOLIDAY_CACHE.set(year, holidays);
+  return holidays;
+}
+
+function calculateEasterSunday(year) {
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31);
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(year, month - 1, day);
+}
+
+function addDays(date, amount) {
+  const copy = new Date(date.getTime());
+  copy.setDate(copy.getDate() + amount);
+  return copy;
+}
+
+function formatISODate(date) {
+  return date.toISOString().split('T')[0];
 }
 
 function createHttpError(status, message) {
